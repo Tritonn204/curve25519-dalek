@@ -36,7 +36,7 @@ pub fn ecdlp_bench(c: &mut Criterion) {
             let res = ecdlp::decode(
                 &view,
                 black_box(point),
-                ECDLPArguments::new_with_range(0, 1 << 48).pseudo_constant_time(true),
+                ECDLPArguments::new_with_range(0, 1 << 48).pseudo_constant_time(false),
             );
             assert_eq!(res, Some(num as i64));
         });
@@ -50,7 +50,6 @@ pub fn ecdlp_bench(c: &mut Criterion) {
                 &view,
                 black_box(point),
                 ECDLPArguments::new_with_range(0, 1 << 48)
-                    .pseudo_constant_time(true)
                     .n_threads(1),
             );
             assert_eq!(res, Some(num as i64));
@@ -65,7 +64,6 @@ pub fn ecdlp_bench(c: &mut Criterion) {
                 &view,
                 black_box(point),
                 ECDLPArguments::new_with_range(0, 1 << 48)
-                    .pseudo_constant_time(true)
                     .n_threads(2),
             );
             assert_eq!(res, Some(num as i64));
@@ -80,7 +78,6 @@ pub fn ecdlp_bench(c: &mut Criterion) {
                 &view,
                 black_box(point),
                 ECDLPArguments::new_with_range(0, 1 << 48)
-                    .pseudo_constant_time(true)
                     .n_threads(4),
             );
             assert_eq!(res, Some(num as i64));
@@ -95,8 +92,21 @@ pub fn ecdlp_bench(c: &mut Criterion) {
                 &view,
                 black_box(point),
                 ECDLPArguments::new_with_range(0, 1 << 48)
-                    .pseudo_constant_time(true)
                     .n_threads(8),
+            );
+            assert_eq!(res, Some(num as i64));
+        });
+    });
+
+    c.bench_function("par fast ecdlp T=16", |b| {
+        let num = rand::thread_rng().gen_range(0u64..(1 << 48));
+        let point = Scalar::from(num) * G;
+        b.iter(|| {
+            let res = ecdlp::par_decode(
+                &view,
+                black_box(point),
+                ECDLPArguments::new_with_range(0, 1 << 48)
+                    .n_threads(16),
             );
             assert_eq!(res, Some(num as i64));
         });

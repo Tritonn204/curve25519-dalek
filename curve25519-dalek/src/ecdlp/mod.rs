@@ -342,7 +342,7 @@ impl<F: ProgressReportFunction> ECDLPArguments<F> {
     }
 }
 
-/// Offset calculations common to [`par_decode`] and [`decode`].
+
 fn decode_prep<R: ProgressReportFunction>(
     precomputed_tables: &ECDLPTablesFileView<'_>,
     point: RistrettoPoint,
@@ -350,38 +350,23 @@ fn decode_prep<R: ProgressReportFunction>(
     n_threads: usize,
     thread_i: usize, // Add thread_i parameter
 ) -> (i64, RistrettoPoint, usize) {
-    let amplitude = (args.range_end - args.range_start).max(0);
+    let amplitude = (args.range_end - args.range_start).max(0) / n_threads as i64;
 
-    let offset = args.range_start
+    let offset = args.range_start + amplitude*thread_i as i64
         + ((1 << (L2 - 1)) << precomputed_tables.get_l1())
         + (1 << (precomputed_tables.get_l1() - 1));
 
-    // Calculate thread-specific offset adjustment
-    let thread_scalar_offset = if n_threads > 1 {
-        // Divide the range into n_threads parts and adjust offset for this thread
-        (amplitude / n_threads as i64) * thread_i as i64
-    } else {
-        0
-    };
-
-    // Adjust the normalized point for this specific thread
     let normalized =
-        point - RistrettoPoint::mul_base(&i64_to_scalar(offset + thread_scalar_offset));
+        point - RistrettoPoint::mul_base(&i64_to_scalar(offset));
 
-    let j_end = (amplitude >> precomputed_tables.get_l1()) as usize;
-    let divceil = |a: usize, b: usize| a.div_ceil(b);
+    let j_end = ((amplitude as i64) >> precomputed_tables.get_l1()) as usize;
+    let divceil = |a, b| (a + b - 1) / b;
 
-    // Calculate appropriate num_batches for this thread
-    let thread_j_end = if n_threads > 1 {
-        j_end / n_threads
-    } else {
-        j_end
-    };
+    let num_batches = divceil(j_end, 1 << L2);
 
-    let num_batches = divceil(thread_j_end, 1 << L2);
-
-    (offset + thread_scalar_offset, normalized, num_batches)
+    (offset, normalized, num_batches)
 }
+
 
 /// Returns an iterator of batches for a given thread. Common to [`par_decode`] and [`decode`].
 /// Iterator item is (index, j_start, target_montgomery, progress).
@@ -431,6 +416,7 @@ pub fn decode<R: ProgressReportFunction>(
         normalized,
         point_iter,
         args.pseudo_constant_time,
+        &AtomicBool::new(false),
         args.progress_report_function,
     )
     .map(|v| v as i64 + offset)
@@ -445,56 +431,92 @@ pub fn par_decode<R: ProgressReportFunction + Sync>(
     point: RistrettoPoint,
     args: ECDLPArguments<R>,
 ) -> Option<i64> {
+    if args.n_threads == 1 {
+        return decode(precomputed_tables, point, args);
+    }
+
     let end_flag = AtomicBool::new(false);
+    let n_threads = args.n_threads;
+
+    let chunk_size: i64 = 1 << 44; // fixed chunk size
+    let total_range = args.range_end - args.range_start;
+    let num_chunks = ((total_range + chunk_size - 1) / chunk_size) as usize; // ceiling division
 
     let res = std::thread::scope(|s| {
-        let handles = (0..args.n_threads)
-            .map(|thread_i| {
+        let mut res = None;
+        let mut next_chunk_start = args.range_start;
+        let mut handles = Vec::new();
+
+        for chunk_index in 0..num_chunks {
+            if next_chunk_start >= args.range_end {
+                break;
+            }
+
+            let chunk_start = next_chunk_start;
+            let chunk_end = (chunk_start + chunk_size).min(args.range_end);
+
+            let chunk_args = ECDLPArguments {
+                range_start: chunk_start,
+                range_end: chunk_end,
+                n_threads: 1,
+                pseudo_constant_time: args.pseudo_constant_time,
+                progress_report_function: NoopReportFn,
+            };
+
+            let end_flag = &end_flag;
+            let progress_report = &args.progress_report_function;
+
+            handles.push(s.spawn(move || {
+                if !chunk_args.pseudo_constant_time && end_flag.load(Ordering::SeqCst) {
+                    return None;
+                }
+
                 let (offset, normalized, num_batches) =
-                    decode_prep(precomputed_tables, point, &args, args.n_threads, thread_i);
+                    decode_prep(precomputed_tables, point, &chunk_args, 1, 0);
 
-                let end_flag = &end_flag;
-
-                let progress_report = &args.progress_report_function;
-                let progress_report = |progress| {
-                    if !args.pseudo_constant_time && end_flag.load(Ordering::SeqCst) {
+                let progress_wrapper = |progress| {
+                    if !chunk_args.pseudo_constant_time && end_flag.load(Ordering::SeqCst) {
                         ControlFlow::Break(())
                     } else {
                         let ret = progress_report.report(progress);
                         if ret.is_break() {
-                            // we need to tell the other threads that the user requested to stop
                             end_flag.store(true, Ordering::SeqCst);
                         }
                         ret
                     }
                 };
 
-                let handle = s.spawn(move || {
-                    let point_iter =
-                        make_point_iterator(precomputed_tables, normalized, num_batches);
-                    let res = fast_ecdlp(
-                        precomputed_tables,
-                        normalized,
-                        point_iter,
-                        args.pseudo_constant_time,
-                        progress_report,
-                    );
+                let point_iter = make_point_iterator(precomputed_tables, normalized, num_batches);
+                let res = fast_ecdlp(
+                    precomputed_tables,
+                    normalized,
+                    point_iter,
+                    chunk_args.pseudo_constant_time,
+                    &end_flag,
+                    progress_wrapper,
+                );
 
-                    if !args.pseudo_constant_time && res.is_some() {
-                        end_flag.store(true, Ordering::SeqCst);
+                if !chunk_args.pseudo_constant_time && res.is_some() {
+                    end_flag.store(true, Ordering::SeqCst);
+                }
+
+                res.map(|v| offset + v as i64)
+            }));
+
+            next_chunk_start = chunk_end;
+
+            // When enough threads are spawned (or last chunk), join them
+            if handles.len() >= n_threads || chunk_index == num_chunks - 1 {
+                for handle in handles.drain(..) {
+                    if let Ok(Some(found)) = handle.join() {
+                        res = Some(found);
+                        break;
                     }
-
-                    res.map(|v| offset + v as i64)
-                });
-
-                handle
-            })
-            .collect::<Vec<_>>();
-
-        let mut res = None;
-        for el in handles {
-            let v = el.join().expect("child thread panicked");
-            res = res.or(v);
+                }
+                if res.is_some() {
+                    break;
+                }
+            }
         }
 
         res
@@ -503,11 +525,14 @@ pub fn par_decode<R: ProgressReportFunction + Sync>(
     res
 }
 
+
+
 fn fast_ecdlp(
     precomputed_tables: &ECDLPTablesFileView<'_>,
     target_point: RistrettoPoint,
     point_iterator: impl Iterator<Item = (usize, usize, AffineMontgomeryPoint, f64)>,
     pseudo_constant_time: bool,
+    end_flag: &AtomicBool,
     progress_report: impl ProgressReportFunction,
 ) -> Option<u64> {
     let t1_table = precomputed_tables.get_t1();
@@ -517,6 +542,11 @@ fn fast_ecdlp(
     let mut consider_candidate = |m| {
         if i64_to_scalar(m) * G == target_point {
             found = found.or(Some(m as u64));
+            
+            // Signal other threads to stop when we find a result
+            if !pseudo_constant_time {
+                end_flag.store(true, Ordering::SeqCst);
+            }
             true
         } else {
             false
@@ -525,6 +555,11 @@ fn fast_ecdlp(
 
     let mut batch = [FieldElement::ZERO; BATCH_SIZE];
     'outer: for (index, j_start, target_montgomery, progress) in point_iterator {
+        // Check end_flag more frequently - at the start of each major iteration
+        if !pseudo_constant_time && end_flag.load(Ordering::SeqCst) {
+            break 'outer;
+        }
+
         // amortize the potential cost of the report function
         if index % 256 == 0 {
             if let ControlFlow::Break(_) = progress_report.report(progress) {
@@ -542,7 +577,7 @@ fn fast_ecdlp(
 
         // Case 2: j=0. Has to be handled separately.
         if t1_table
-            .lookup(&target_montgomery.u.as_bytes(), |i| {
+            .lookup(&target_montgomery.u.as_bytes(), |i| {                
                 consider_candidate(((j_start as i64) << precomputed_tables.get_l1()) + i as i64)
                     || consider_candidate(
                         ((j_start as i64) << precomputed_tables.get_l1()) - i as i64,
@@ -559,6 +594,9 @@ fn fast_ecdlp(
             let j = i + 1;
             let t2_point = t2_table.index(j as _);
             let diff = &t2_point.u - &target_montgomery.u;
+            if !pseudo_constant_time && end_flag.load(Ordering::SeqCst) {
+                break 'outer;
+            }
 
             if diff == FieldElement::ZERO {
                 // Case 1: (Montgomery addition) exceptional case when T2[j] = Pm.
@@ -583,13 +621,16 @@ fn fast_ecdlp(
             // Montgomery addition: general case
 
             let t2_point = t2_table.index(j as _);
-
             let alpha = &(&MONTGOMERY_A_NEG - &t2_point.u) - &target_montgomery.u;
 
             // lambda = (T2[j]_y - Pm_y) * nu
             // Q_x = lambda^2 - A - T2[j]_x - Pm_x
             let lambda = &(&t2_point.v - &target_montgomery.v) * nu;
             let qx = &lambda.square() + &alpha;
+
+            if !pseudo_constant_time && end_flag.load(Ordering::SeqCst) {
+                break 'outer;
+            }
 
             // Case 3: general case, negative j.
             if t1_table
@@ -634,6 +675,7 @@ fn fast_ecdlp(
 
     found
 }
+
 
 // FIXME(upstrean): should be an impl From<i64> for Scalar
 fn i64_to_scalar(n: i64) -> Scalar {
@@ -707,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ecdlp() {
+    fn test_ecdlp_single() {
         let tables = read_or_gen_tables();
         let view = tables.view();
 
@@ -730,21 +772,26 @@ mod tests {
 
     #[test]
     fn test_ecdlp_par_decode() {
-        let base: u64 = (1 << 48) / 16;
-
         let tables = read_or_gen_tables();
         let view = tables.view();
 
-        for i in 0..17 {
-            let value = base * i;
+        for i in (0..(1u64 << 48)).step_by(1 << L1).take(1 << 12) {
+            let value = i;
 
-            let point = RistrettoPoint::mul_base(&Scalar::from(value));
+            let mut point = RistrettoPoint::mul_base(&Scalar::from(value));
+
+            if rand::thread_rng().gen() {
+                // do a round of compression/decompression to mess up the Z and Ts
+                // & ecdlp will need to clear the cofactor
+                point = point.compress().decompress().unwrap();
+            }
+
             let res = par_decode(
                 &view,
                 point,
                 ECDLPArguments::new_with_range(0, 1 << 48)
                     .n_threads(4)
-                    .pseudo_constant_time(true),
+                    .pseudo_constant_time(false),
             );
             assert_eq!(res, Some(value as i64));
         }
