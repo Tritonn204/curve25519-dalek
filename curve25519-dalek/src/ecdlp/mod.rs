@@ -19,7 +19,7 @@
 //!
 //! # Table generation
 //!
-//! For now, table generation can be done using the `gen_t1_t2` test, or using the unstable [`ecdlp::table_generation`] module.
+//! For now, table generation can be done using the `gen_t1_t2` test, or using the unstable [`ecdlp::generation`] module.
 //!
 //! # Constant time
 //!
@@ -91,7 +91,9 @@ mod affine_montgomery;
 mod table;
 
 use crate::{
-    RistrettoPoint, Scalar, constants::MONTGOMERY_A_NEG, constants::RISTRETTO_BASEPOINT_POINT as G,
+    RistrettoPoint, Scalar,
+    constants::MONTGOMERY_A_NEG,
+    constants::RISTRETTO_BASEPOINT_POINT as G,
     field::FieldElement,
 };
 use affine_montgomery::AffineMontgomeryPoint;
@@ -100,10 +102,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub use table::{
-    ECDLPTablesFileView, NoOpProgressTableGenerationReportFunction,
-    ProgressTableGenerationReportFunction, ReportStep, table_generation,
-};
+pub use table::*;
 
 use table::{BATCH_SIZE, L2};
 
@@ -146,7 +145,7 @@ pub struct ECDLPTables {
 impl ECDLPTables {
     /// Get the expected final bytes size and number of vec elements in the tables.
     pub fn get_required_sizes(l1: usize) -> (usize, usize) {
-        let size = table_generation::table_file_len(l1);
+        let size = generation::table_file_len(l1);
         let mut n = size / 32;
         if size % 32 != 0 {
             n += 1;
@@ -167,7 +166,7 @@ impl ECDLPTables {
     /// Generate a new precomputed tables
     pub fn generate(l1: usize) -> std::io::Result<Self> {
         let mut zelf = Self::empty(l1);
-        table_generation::create_table_file(l1, zelf.as_mut_slice())?;
+        generation::create_table_file(l1, zelf.as_mut_slice())?;
 
         Ok(zelf)
     }
@@ -175,7 +174,7 @@ impl ECDLPTables {
     /// Generate a new precomputed tables, with multithreading
     pub fn generate_par(l1: usize, n_threads: usize) -> std::io::Result<Self> {
         let mut zelf = Self::empty(l1);
-        table_generation::create_table_file_par(l1, n_threads, zelf.as_mut_slice())?;
+        generation::create_table_file_par(l1, n_threads, zelf.as_mut_slice())?;
 
         Ok(zelf)
     }
@@ -186,7 +185,7 @@ impl ECDLPTables {
         p: P,
     ) -> std::io::Result<Self> {
         let mut zelf = Self::empty(l1);
-        table_generation::create_table_file_with_progress_report(l1, zelf.as_mut_slice(), p)?;
+        generation::create_table_file_with_progress_report(l1, zelf.as_mut_slice(), p)?;
 
         Ok(zelf)
     }
@@ -198,7 +197,7 @@ impl ECDLPTables {
         p: P,
     ) -> std::io::Result<Self> {
         let mut zelf = Self::empty(l1);
-        table_generation::create_table_file_with_progress_report_par(
+        generation::create_table_file_with_progress_report_par(
             l1,
             n_threads,
             zelf.as_mut_slice(),
@@ -459,6 +458,7 @@ pub fn decode<R: ProgressReportFunction>(
 /// This uses [`std::thread`] as a threading primitive, and as such, it is only available when the `std` feature is enabled.
 /// This may take a long time, so if you are running on an event-loop such as `tokio`, you
 /// should wrap this in a `tokio::block_on` task.
+#[cfg(feature = "std")]
 pub fn par_decode<R: ProgressReportFunction + Sync>(
     precomputed_tables: &ECDLPTablesFileView<'_>,
     point: RistrettoPoint,
