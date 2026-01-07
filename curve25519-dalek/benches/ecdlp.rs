@@ -9,11 +9,11 @@ use std::{path::Path, time::Duration};
 
 pub fn ecdlp_bench(c: &mut Criterion) {
     if !Path::new("ecdlp_table.bin").exists() {
-        let tables = ECDLPTables::generate(26).unwrap();
-        tables.write_to_file("ecdlp_table.bin").unwrap();
+        let tables = ECDLPTables::generate(26).expect("Failed to generate ECDLP tables");
+        tables.write_to_file("ecdlp_table.bin").expect("Failed to write ECDLP tables to file");
     }
 
-    let tables = ECDLPTables::load_from_file(26, "ecdlp_table.bin").unwrap();
+    let tables = ECDLPTables::load_from_file(26, "ecdlp_table.bin").expect("Failed to load ECDLP tables from file");
     let view = tables.view();
 
     c.bench_function("fast ecdlp non constant time", |b| {
@@ -212,11 +212,11 @@ fn bench_table_generation(c: &mut Criterion) {
 
     for l1 in [13, 18, 21].iter() {
         group.bench_with_input(BenchmarkId::new("Sequential", l1), l1, |b, &l1| {
-            b.iter(|| ECDLPTables::generate(l1).unwrap());
+            b.iter(|| ECDLPTables::generate(l1).expect("Failed to generate ECDLP tables"));
         });
 
         group.bench_with_input(BenchmarkId::new("Parallel", l1), l1, |b, &l1| {
-            b.iter(|| ECDLPTables::generate_par(l1, n_threads).unwrap());
+            b.iter(|| ECDLPTables::generate_par(l1, n_threads).expect("Failed to generate ECDLP tables in parallel"));
         });
     }
 
