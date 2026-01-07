@@ -62,8 +62,7 @@ fn t1_cuckoo_setup<P: ProgressTableGenerationReportFunction>(
                 if j == CUCKOO_MAX_INSERT_SWAPS - 1 {
                     // We actually don't have to implement the case where we need to rehash the
                     // whole map.
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
+                    return Err(io::Error::other(
                         "Cuckoo hashmap insertion failed, rehash needed",
                     ));
                 }
@@ -229,8 +228,7 @@ fn create_t1_table_par<P: ProgressTableGenerationReportFunction + Sync>(
         // Wait for all threads to complete
         let mut all_entries = Vec::with_capacity(j_max + 1);
         for handle in handles {
-            let entries = handle.join().map_err(|e| io::Error::new(
-                io::ErrorKind::Other,
+            let entries = handle.join().map_err(|e| io::Error::other(
                 format!("Thread T1 panicked: {:?}", e)
             ))?;
 
@@ -336,8 +334,7 @@ fn create_t2_table_par<P: ProgressTableGenerationReportFunction + Sync>(
 
         // Wait for all threads
         for handle in handles {
-            handle.join().map_err(|e| io::Error::new(
-                io::ErrorKind::Other,
+            handle.join().map_err(|e| io::Error::other(
                 format!("Thread T2 panicked: {:?}", e)
             ))?;
         }
