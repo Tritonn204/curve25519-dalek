@@ -64,6 +64,123 @@ impl AffineMontgomeryPoint {
             AffineMontgomeryPoint { u: new_u, v: new_v }
         }
     }
+
+        /// Add the same point to 4 different points simultaneously
+    pub fn batch_addition_not_ct_4way(
+        points: &[Self; 4],
+        addend: &Self,
+    ) -> [Self; 4] {
+        // Early exit checks for identity
+        if addend.is_identity_not_ct() {
+            return *points;
+        }
+
+        // Check if any input points are identity
+        let mut results = [Self::identity(); 4];
+        let mut mask = [false; 4];
+        for i in 0..4 {
+            if points[i].is_identity_not_ct() {
+                results[i] = *addend;
+                mask[i] = true;
+            }
+        }
+
+        // Extract u and v coordinates for batch operations
+        let mut u_coords = [points[0].u, points[1].u, points[2].u, points[3].u];
+        FieldElement::batch_subtract(&mut u_coords, &addend.u);
+
+        let mut v_coords = [points[0].v, points[1].v, points[2].v, points[3].v];
+
+        // Check for inverse points (u1 == u2 && v1 == -v2)
+        FieldElement::batch_add(&mut v_coords, &addend.v);
+
+        // Compute denominators for lambda
+        let mut denominators = [FieldElement::ZERO; 4];
+        let mut is_doubling = [false; 4];
+
+        for ((i, u_coord), v_coord) in u_coords.iter().enumerate().zip(v_coords.iter()) {
+            if mask[i] {
+                continue;
+            }
+
+            if *u_coord == FieldElement::ZERO {
+                if *v_coord == FieldElement::ZERO {
+                    // Point at infinity case
+                    results[i] = Self::identity();
+                    mask[i] = true;
+                } else {
+                    // Doubling case
+                    is_doubling[i] = true;
+                    denominators[i] = &points[i].v + &points[i].v;
+                }
+            } else {
+                // Regular addition case
+                denominators[i] = *u_coord;
+            }
+        }
+
+        // Batch invert denominators
+        let mut inv_denominators = denominators;
+        FieldElement::invert_batch(&mut inv_denominators);
+
+        // Compute numerators based on doubling vs addition
+        let mut numerators = [FieldElement::ZERO; 4];
+        for i in 0..4 {
+            if mask[i] {
+                continue;
+            }
+
+            if is_doubling[i] {
+                // (3*u1^2 + 2*A*u1 + 1)
+                let u_sq = points[i].u.square();
+                let u_sq_3 = &(&u_sq + &u_sq) + &u_sq;
+                let u_ta = &MONTGOMERY_A * &points[i].u;
+                let u_ta_2 = &u_ta + &u_ta;
+                numerators[i] = &(&u_sq_3 + &u_ta_2) + &FieldElement::ONE;
+            } else {
+                // (v1 - v2)
+                numerators[i] = &points[i].v - &addend.v;
+            }
+        }
+
+        // Compute lambdas using batch multiplication
+        FieldElement::batch_mul(&mut numerators, &inv_denominators);
+
+        let mut lambdas = numerators;
+
+        // Square lambdas
+        FieldElement::batch_square(&mut numerators);
+
+        // Compute new u coordinates: lambda^2 - A - u1 - u2
+        for ((u, mask_val), point) in numerators.iter_mut().zip(mask.iter()).zip(points.iter()) {
+            if !*mask_val {
+                *u = &(&*u - &MONTGOMERY_A) - &(&point.u + &addend.u);
+            }
+        }
+
+        // Compute u1 - u3 for each point
+        let u_diffs_for_v = [
+            &points[0].u - &numerators[0],
+            &points[1].u - &numerators[1],
+            &points[2].u - &numerators[2],
+            &points[3].u - &numerators[3],
+        ];
+
+        // Compute new v coordinates: lambda * (u1 - u3) - v1
+        FieldElement::batch_mul(&mut lambdas, &u_diffs_for_v);
+
+        // Assemble results
+        for (i, (((u, v), point), mask_val)) in numerators.into_iter().zip(lambdas).zip(points.iter()).zip(mask.iter()).enumerate() {
+            if !*mask_val {
+                results[i] = Self {
+                    u: u,
+                    v:  &v - &point.v,
+                };
+            }
+        }
+
+        results
+    }
 }
 
 // see test for correctness of this const

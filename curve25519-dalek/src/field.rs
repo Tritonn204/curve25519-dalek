@@ -439,6 +439,33 @@ impl FieldElement {
 
         result
     }
+
+    /// Subtracts a single `FieldElement` from each of `FieldElement`s in place.
+    pub fn batch_subtract<const N: usize>(a: &mut [Self; N], b: &Self) {
+        for ai in a.iter_mut() {
+            *ai -= b;
+        }
+    }
+
+    /// Adds a single `FieldElement` to each of `FieldElement`s in place.
+    pub fn batch_add<const N: usize>(a: &mut [Self; N], b: &Self) {
+        for ai in a.iter_mut() {
+            *ai += b;
+        }
+    }
+
+    /// Multiplies each of `FieldElement`s by the corresponding `FieldElement`s in place.
+    pub fn batch_mul<const N: usize>(a: &mut [Self; N], b: &[Self; N]) {
+        for (ai, bi) in a.iter_mut().zip(b.iter()) {
+            *ai *= bi;
+        }        
+    }
+
+    pub fn batch_square<const N: usize>(a: &mut [Self; N]) {
+        for ai in a.iter_mut() {
+            *ai = ai.square();
+        }        
+    }
 }
 
 /// Hashes the concatenation of the elements of `msg` with domain separator equal to the
