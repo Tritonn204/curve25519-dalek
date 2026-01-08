@@ -112,7 +112,9 @@ impl AffineMontgomeryPoint {
                 } else {
                     // Doubling case
                     is_doubling[i] = true;
-                    denominators[i] = &points[i].v + &points[i].v;
+                    let point = &points[i];
+                    // Denominator is 2*v1
+                    denominators[i] = &point.v + &point.v;
                 }
             } else {
                 // Regular addition case
