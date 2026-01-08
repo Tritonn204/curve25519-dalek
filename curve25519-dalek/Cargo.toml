@@ -81,7 +81,7 @@ precomputed-tables = []
 legacy_compatibility = []
 group = ["dep:group", "rand_core"]
 group-bits = ["group", "ff/bits"]
-ecdlp = ["alloc", "std", "dep:bytemuck"]
+ecdlp = ["alloc", "std", "digest", "dep:bytemuck"]
 digest = ["dep:digest"]
 lizard = ["digest"]
 
