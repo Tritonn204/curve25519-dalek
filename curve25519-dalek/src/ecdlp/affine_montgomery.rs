@@ -1,3 +1,4 @@
+use std::array;
 use crate::{EdwardsPoint, constants::MONTGOMERY_A, field::FieldElement};
 
 #[derive(Clone, Copy, Debug)]
@@ -65,20 +66,20 @@ impl AffineMontgomeryPoint {
         }
     }
 
-        /// Add the same point to 4 different points simultaneously
-    pub fn batch_addition_not_ct_4way(
-        points: &[Self; 4],
+    /// Add the same point to N different points simultaneously
+    pub fn batch_addition_not_ct<const N: usize>(
+        points: &[Self; N],
         addend: &Self,
-    ) -> [Self; 4] {
+    ) -> [Self; N] {
         // Early exit checks for identity
         if addend.is_identity_not_ct() {
             return *points;
         }
 
         // Check if any input points are identity
-        let mut results = [Self::identity(); 4];
-        let mut mask = [false; 4];
-        for i in 0..4 {
+        let mut results = [Self::identity(); N];
+        let mut mask = [false; N];
+        for i in 0..N {
             if points[i].is_identity_not_ct() {
                 results[i] = *addend;
                 mask[i] = true;
@@ -86,17 +87,17 @@ impl AffineMontgomeryPoint {
         }
 
         // Extract u and v coordinates for batch operations
-        let mut u_coords = [points[0].u, points[1].u, points[2].u, points[3].u];
+        let mut u_coords: [FieldElement; N] = array::from_fn(|i| points[i].u);
         FieldElement::batch_subtract(&mut u_coords, &addend.u);
 
-        let mut v_coords = [points[0].v, points[1].v, points[2].v, points[3].v];
+        let mut v_coords: [FieldElement; N] = array::from_fn(|i| points[i].v);
 
         // Check for inverse points (u1 == u2 && v1 == -v2)
         FieldElement::batch_add(&mut v_coords, &addend.v);
 
         // Compute denominators for lambda
-        let mut denominators = [FieldElement::ZERO; 4];
-        let mut is_doubling = [false; 4];
+        let mut denominators = [FieldElement::ZERO; N];
+        let mut is_doubling = [false; N];
 
         for ((i, u_coord), v_coord) in u_coords.iter().enumerate().zip(v_coords.iter()) {
             if mask[i] {
@@ -124,8 +125,8 @@ impl AffineMontgomeryPoint {
         FieldElement::invert_batch(&mut inv_denominators);
 
         // Compute numerators based on doubling vs addition
-        let mut numerators = [FieldElement::ZERO; 4];
-        for i in 0..4 {
+        let mut numerators = [FieldElement::ZERO; N];
+        for i in 0..N {
             if mask[i] {
                 continue;
             }
@@ -159,12 +160,7 @@ impl AffineMontgomeryPoint {
         }
 
         // Compute u1 - u3 for each point
-        let u_diffs_for_v = [
-            &points[0].u - &numerators[0],
-            &points[1].u - &numerators[1],
-            &points[2].u - &numerators[2],
-            &points[3].u - &numerators[3],
-        ];
+        let u_diffs_for_v = array::from_fn(|i| &points[i].u - &numerators[i]);
 
         // Compute new v coordinates: lambda * (u1 - u3) - v1
         FieldElement::batch_mul(&mut lambdas, &u_diffs_for_v);
@@ -208,7 +204,9 @@ impl From<&'_ EdwardsPoint> for AffineMontgomeryPoint {
 
 #[cfg(test)]
 mod tests {
+    use crate::Scalar;
     use super::*;
+
     #[test]
     fn test_const_alpha() {
         // Constant comes from https://ristretto.group/details/isogenies.html (birational mapping from E2 = E_(a2,d2) to M_(B,A))
@@ -220,4 +218,74 @@ mod tests {
 
         assert_eq!(ALPHA.to_bytes(), v.to_bytes());
     }
+
+    #[test]
+    fn test_batch_addition_not_ct() {
+        // Create test points by converting from Edwards points
+        let ed_p1 = EdwardsPoint::mul_base(&Scalar::from(2u64));
+        let ed_p2 = EdwardsPoint::mul_base(&Scalar::from(3u64));
+        let ed_p3 = EdwardsPoint::mul_base(&Scalar::from(5u64));
+        let ed_p4 = EdwardsPoint::mul_base(&Scalar::from(7u64));
+        let ed_addend = EdwardsPoint::mul_base(&Scalar::from(11u64));
+        let p1 = AffineMontgomeryPoint::from(&ed_p1);
+        let p2 = AffineMontgomeryPoint::from(&ed_p2);
+        let p3 = AffineMontgomeryPoint::from(&ed_p3);
+        let p4 = AffineMontgomeryPoint::from(&ed_p4);
+        let addend = AffineMontgomeryPoint::from(&ed_addend);
+
+        // Test batch addition
+        let points = [p1, p2, p3, p4, p4];
+        let batch_results = AffineMontgomeryPoint::batch_addition_not_ct(&points, &addend);
+
+        // Compare with individual additions
+        let individual_results = [
+            p1.addition_not_ct(&addend),
+            p2.addition_not_ct(&addend),
+            p3.addition_not_ct(&addend),
+            p4.addition_not_ct(&addend),
+            p4.addition_not_ct(&addend),
+        ];
+
+        for i in 0..5 {
+            assert_eq!(
+                batch_results[i].u.to_bytes(),
+                individual_results[i].u.to_bytes(),
+                "batch_addition u mismatch at index {}",
+                i
+            );
+            assert_eq!(
+                batch_results[i].v.to_bytes(),
+                individual_results[i].v.to_bytes(),
+                "batch_addition v mismatch at index {}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_batch_addition_identity_cases() {
+        let ed_p1 = EdwardsPoint::mul_base(&Scalar::from(2u64));
+        let ed_p2 = EdwardsPoint::mul_base(&Scalar::from(3u64));
+        
+        let p1 = AffineMontgomeryPoint::from(&ed_p1);
+        let p2 = AffineMontgomeryPoint::from(&ed_p2);
+        let identity = AffineMontgomeryPoint::identity();
+
+        // Test adding identity to points
+        let points = [p1, p2, identity, p1];
+        let batch_results = AffineMontgomeryPoint::batch_addition_not_ct(&points, &identity);
+        
+        assert_eq!(batch_results[0].u.to_bytes(), p1.u.to_bytes());
+        assert_eq!(batch_results[1].u.to_bytes(), p2.u.to_bytes());
+        assert_eq!(batch_results[2].u.to_bytes(), identity.u.to_bytes());
+
+        // Test adding to identity points
+        let addend = AffineMontgomeryPoint::from(&ed_p1);
+        let points_with_identity = [identity, p2, identity, p1];
+        let batch_results2 = AffineMontgomeryPoint::batch_addition_not_ct(&points_with_identity, &addend);
+        
+        assert_eq!(batch_results2[0].u.to_bytes(), addend.u.to_bytes());
+        assert_eq!(batch_results2[0].v.to_bytes(), addend.v.to_bytes());
+    }
 }
+
