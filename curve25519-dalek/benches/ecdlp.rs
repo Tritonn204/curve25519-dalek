@@ -2,7 +2,7 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use curve25519_dalek::{
     Scalar,
     constants::RISTRETTO_BASEPOINT_POINT as G,
-    ecdlp::{self, ECDLPArguments, ECDLPTables},
+    ecdlp::{self, DefaultScheduler, ECDLPArguments, ECDLPTables},
 };
 use rand::{Rng, rng};
 use std::{path::Path, time::Duration};
@@ -46,7 +46,7 @@ pub fn ecdlp_bench(c: &mut Criterion) {
         let num = rng().random_range(0u64..(1 << 48));
         let point = Scalar::from(num) * G;
         b.iter(|| {
-            let res = ecdlp::par_decode(
+            let res = ecdlp::par_decode::<DefaultScheduler, _>(
                 &view,
                 black_box(point),
                 ECDLPArguments::new_with_range(0, 1 << 48)
@@ -61,7 +61,7 @@ pub fn ecdlp_bench(c: &mut Criterion) {
         let num = rng().random_range(0u64..(1 << 48));
         let point = Scalar::from(num) * G;
         b.iter(|| {
-            let res = ecdlp::par_decode(
+            let res = ecdlp::par_decode::<DefaultScheduler, _>(
                 &view,
                 black_box(point),
                 ECDLPArguments::new_with_range(0, 1 << 48)
@@ -76,7 +76,7 @@ pub fn ecdlp_bench(c: &mut Criterion) {
         let num = rng().random_range(0u64..(1 << 48));
         let point = Scalar::from(num) * G;
         b.iter(|| {
-            let res = ecdlp::par_decode(
+            let res = ecdlp::par_decode::<DefaultScheduler, _>(
                 &view,
                 black_box(point),
                 ECDLPArguments::new_with_range(0, 1 << 48)
@@ -91,7 +91,7 @@ pub fn ecdlp_bench(c: &mut Criterion) {
         let num = rng().random_range(0u64..(1 << 48));
         let point = Scalar::from(num) * G;
         b.iter(|| {
-            let res = ecdlp::par_decode(
+            let res = ecdlp::par_decode::<DefaultScheduler, _>(
                 &view,
                 black_box(point),
                 ECDLPArguments::new_with_range(0, 1 << 48)
@@ -134,7 +134,7 @@ pub fn ecdlp_bench(c: &mut Criterion) {
             let num = rng().random_range(0u64..(1 << 47));
             let point = Scalar::from(num) * G;
             b.iter(|| {
-                let res = ecdlp::par_decode(
+                let res = ecdlp::par_decode::<DefaultScheduler, _>(
                     &view,
                     black_box(point),
                     ECDLPArguments::new_with_range(0, 1 << 48).n_threads(1),
@@ -216,7 +216,7 @@ fn bench_table_generation(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("Parallel", l1), l1, |b, &l1| {
-            b.iter(|| ECDLPTables::generate_par(l1, n_threads).expect("Failed to generate ECDLP tables in parallel"));
+            b.iter(|| ECDLPTables::generate_par::<DefaultScheduler>(l1, n_threads).expect("Failed to generate ECDLP tables in parallel"));
         });
     }
 

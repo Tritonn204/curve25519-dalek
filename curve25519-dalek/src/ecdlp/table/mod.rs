@@ -8,7 +8,7 @@ use std::{
     mem::size_of,
     ops::ControlFlow,
 };
-use crate::field::FieldElement;
+use crate::{ecdlp::Scheduler, field::FieldElement};
 
 use super::affine_montgomery::AffineMontgomeryPoint;
 
@@ -21,6 +21,133 @@ pub(crate) const CUCKOO_K: usize = 3; // number of cuckoo lookups before giving 
 
 // Note: file layout is just T2 followed by T1 keys and then T1 values.
 // We just do casts using `bytemuck` since everything are PODs.
+
+
+/// A struct to ensure that the bytes are aligned on 32 bytes.
+/// This is required for the table generation.
+#[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
+#[repr(C, align(32))]
+struct ForcedAlign32([u8; 32]);
+
+/// The tables file is a big array of ForcedAlign32, which is a 32-byte aligned array of bytes.
+/// Some bytes may be used as padding only.
+/// This prevent using memory-mapped files, as the alignment is not guaranteed.
+pub struct ECDLPTables {
+    bytes: Vec<ForcedAlign32>,
+    l1: usize,
+    size: usize,
+}
+
+impl ECDLPTables {
+    /// Get the expected final bytes size and number of vec elements in the tables.
+    pub fn get_required_sizes(l1: usize) -> (usize, usize) {
+        let size = generation::table_file_len(l1);
+        let mut n = size / 32;
+        if size % 32 != 0 {
+            n += 1;
+        }
+        (size, n)
+    }
+
+    /// Create a new empty precomputed tables.
+    pub fn empty(l1: usize) -> Self {
+        let (size, n) = Self::get_required_sizes(l1);
+        Self {
+            l1,
+            bytes: vec![Default::default(); n],
+            size,
+        }
+    }
+
+    /// Generate a new precomputed tables
+    pub fn generate(l1: usize) -> std::io::Result<Self> {
+        let mut zelf = Self::empty(l1);
+        generation::create_table_file(l1, zelf.as_mut_slice())?;
+
+        Ok(zelf)
+    }
+
+    /// Generate a new precomputed tables, with multithreading
+    pub fn generate_par<S: Scheduler>(l1: usize, n_threads: usize) -> std::io::Result<Self> {
+        let mut zelf = Self::empty(l1);
+        generation::create_table_file_par::<S>(l1, n_threads, zelf.as_mut_slice())?;
+
+        Ok(zelf)
+    }
+
+    /// Generate a new precomputed tables with a progress report function.
+    pub fn generate_with_progress_report<P: ProgressTableGenerationReportFunction>(
+        l1: usize,
+        p: P,
+    ) -> std::io::Result<Self> {
+        let mut zelf = Self::empty(l1);
+        generation::create_table_file_with_progress_report(l1, zelf.as_mut_slice(), p)?;
+
+        Ok(zelf)
+    }
+
+    /// Generate a new precomputed tables with a progress report function, with multithreading.
+    pub fn generate_with_progress_report_par<S: Scheduler, P: ProgressTableGenerationReportFunction + Sync>(
+        l1: usize,
+        n_threads: usize,
+        p: P,
+    ) -> std::io::Result<Self> {
+        let mut zelf = Self::empty(l1);
+        generation::create_table_file_with_progress_report_par::<S, P>(
+            l1,
+            n_threads,
+            zelf.as_mut_slice(),
+            p,
+        )?;
+
+        Ok(zelf)
+    }
+
+    /// Load the tables from a bytes slice.
+    pub fn from_bytes(l1: usize, bytes: &[u8]) -> Self {
+        let mut zelf = Self::empty(l1);
+        zelf.as_mut_slice().copy_from_slice(bytes);
+
+        zelf
+    }
+
+    /// Load the tables from a file.
+    #[cfg(feature = "std")]
+    pub fn load_from_file(l1: usize, path: &str) -> std::io::Result<Self> {
+        use std::io::Read;
+        let mut zelf = Self::empty(l1);
+
+        let mut file = std::fs::File::open(path)?;
+        file.read_exact(zelf.as_mut_slice())?;
+
+        Ok(zelf)
+    }
+
+    /// Write the tables to a file.
+    #[cfg(feature = "std")]
+    pub fn write_to_file(&self, path: &str) -> std::io::Result<()> {
+        use std::io::Write;
+
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(self.as_slice())?;
+        Ok(())
+    }
+
+    /// Get the tables as a slice of bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        &bytemuck::cast_slice(&self.bytes)[..self.size]
+    }
+
+    /// Get the tables a mutable slice of bytes.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut bytemuck::cast_slice_mut(&mut self.bytes)[..self.size]
+    }
+
+    /// Get a view of the tables.
+    pub fn view(&self) -> ECDLPTablesFileView<'_> {
+        ECDLPTablesFileView::from_bytes(self.as_slice(), self.l1)
+    }
+}
 
 /// A view into an ECDLP precomputed table. This is a wrapper around a read-only byte array, which you could back by an memory mapped file, for example.
 pub struct ECDLPTablesFileView<'a> {

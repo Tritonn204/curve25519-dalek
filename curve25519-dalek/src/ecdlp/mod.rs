@@ -89,6 +89,7 @@ mod ecdlp_notes {
 
 mod affine_montgomery;
 mod table;
+mod scheduler;
 
 use crate::{
     RistrettoPoint, Scalar,
@@ -103,6 +104,7 @@ use core::{
 };
 
 pub use table::*;
+pub use scheduler::*;
 
 use table::{BATCH_SIZE, L2};
 
@@ -124,132 +126,6 @@ impl ProgressReportFunction for NoopReportFn {
     #[inline(always)]
     fn report(&self, _progress: f64) -> ControlFlow<()> {
         ControlFlow::Continue(())
-    }
-}
-
-/// A struct to ensure that the bytes are aligned on 32 bytes.
-/// This is required for the table generation.
-#[derive(Default, bytemuck::Pod, bytemuck::Zeroable, Copy, Clone)]
-#[repr(C, align(32))]
-struct ForcedAlign32([u8; 32]);
-
-/// The tables file is a big array of ForcedAlign32, which is a 32-byte aligned array of bytes.
-/// Some bytes may be used as padding only.
-/// This prevent using memory-mapped files, as the alignment is not guaranteed.
-pub struct ECDLPTables {
-    bytes: Vec<ForcedAlign32>,
-    l1: usize,
-    size: usize,
-}
-
-impl ECDLPTables {
-    /// Get the expected final bytes size and number of vec elements in the tables.
-    pub fn get_required_sizes(l1: usize) -> (usize, usize) {
-        let size = generation::table_file_len(l1);
-        let mut n = size / 32;
-        if size % 32 != 0 {
-            n += 1;
-        }
-        (size, n)
-    }
-
-    /// Create a new empty precomputed tables.
-    pub fn empty(l1: usize) -> Self {
-        let (size, n) = Self::get_required_sizes(l1);
-        Self {
-            l1,
-            bytes: vec![Default::default(); n],
-            size,
-        }
-    }
-
-    /// Generate a new precomputed tables
-    pub fn generate(l1: usize) -> std::io::Result<Self> {
-        let mut zelf = Self::empty(l1);
-        generation::create_table_file(l1, zelf.as_mut_slice())?;
-
-        Ok(zelf)
-    }
-
-    /// Generate a new precomputed tables, with multithreading
-    pub fn generate_par(l1: usize, n_threads: usize) -> std::io::Result<Self> {
-        let mut zelf = Self::empty(l1);
-        generation::create_table_file_par(l1, n_threads, zelf.as_mut_slice())?;
-
-        Ok(zelf)
-    }
-
-    /// Generate a new precomputed tables with a progress report function.
-    pub fn generate_with_progress_report<P: ProgressTableGenerationReportFunction>(
-        l1: usize,
-        p: P,
-    ) -> std::io::Result<Self> {
-        let mut zelf = Self::empty(l1);
-        generation::create_table_file_with_progress_report(l1, zelf.as_mut_slice(), p)?;
-
-        Ok(zelf)
-    }
-
-    /// Generate a new precomputed tables with a progress report function, with multithreading.
-    pub fn generate_with_progress_report_par<P: ProgressTableGenerationReportFunction + Sync>(
-        l1: usize,
-        n_threads: usize,
-        p: P,
-    ) -> std::io::Result<Self> {
-        let mut zelf = Self::empty(l1);
-        generation::create_table_file_with_progress_report_par(
-            l1,
-            n_threads,
-            zelf.as_mut_slice(),
-            p,
-        )?;
-
-        Ok(zelf)
-    }
-
-    /// Load the tables from a bytes slice.
-    pub fn from_bytes(l1: usize, bytes: &[u8]) -> Self {
-        let mut zelf = Self::empty(l1);
-        zelf.as_mut_slice().copy_from_slice(bytes);
-
-        zelf
-    }
-
-    /// Load the tables from a file.
-    #[cfg(feature = "std")]
-    pub fn load_from_file(l1: usize, path: &str) -> std::io::Result<Self> {
-        use std::io::Read;
-        let mut zelf = Self::empty(l1);
-
-        let mut file = std::fs::File::open(path)?;
-        file.read_exact(zelf.as_mut_slice())?;
-
-        Ok(zelf)
-    }
-
-    /// Write the tables to a file.
-    #[cfg(feature = "std")]
-    pub fn write_to_file(&self, path: &str) -> std::io::Result<()> {
-        use std::io::Write;
-
-        let mut file = std::fs::File::create(path)?;
-        file.write_all(self.as_slice())?;
-        Ok(())
-    }
-
-    /// Get the tables as a slice of bytes.
-    pub fn as_slice(&self) -> &[u8] {
-        &bytemuck::cast_slice(&self.bytes)[..self.size]
-    }
-
-    /// Get the tables a mutable slice of bytes.
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut bytemuck::cast_slice_mut(&mut self.bytes)[..self.size]
-    }
-
-    /// Get a view of the tables.
-    pub fn view(&self) -> ECDLPTablesFileView<'_> {
-        ECDLPTablesFileView::from_bytes(self.as_slice(), self.l1)
     }
 }
 
@@ -459,16 +335,22 @@ pub fn decode<R: ProgressReportFunction>(
 /// This may take a long time, so if you are running on an event-loop such as `tokio`, you
 /// should wrap this in a `tokio::block_on` task.
 #[cfg(feature = "std")]
-pub fn par_decode<R: ProgressReportFunction + Sync>(
+pub fn par_decode<S, R>(
     precomputed_tables: &ECDLPTablesFileView<'_>,
     point: RistrettoPoint,
     args: ECDLPArguments<R>,
-) -> Option<i64> {
+) -> Option<i64>
+where
+    S: Scheduler,
+    R: ProgressReportFunction + Sync,
+{
     let end_flag = AtomicBool::new(false);
 
-    std::thread::scope(|s| {
+    S::scope(|s| {
         let handles = (0..args.n_threads)
             .map(|thread_i| {
+                use crate::ecdlp::scheduler::SchedulerScope;
+
                 let (offset, normalized, num_batches) =
                     decode_prep(precomputed_tables, point, &args, args.n_threads, thread_i);
 
@@ -762,7 +644,7 @@ mod tests {
             let value = base * i;
 
             let point = RistrettoPoint::mul_base(&Scalar::from(value));
-            let res = par_decode(
+            let res = par_decode::<DefaultScheduler, _>(
                 &view,
                 point,
                 ECDLPArguments::new_with_range(0, 1 << 48)
@@ -776,7 +658,7 @@ mod tests {
     #[test]
     fn test_table_par() {
         // Measure parallel generation time
-        let tables_par = ECDLPTables::generate_par(
+        let tables_par = ECDLPTables::generate_par::<DefaultScheduler>(
             18,
             std::thread::available_parallelism()
                 .map(|n| n.get())

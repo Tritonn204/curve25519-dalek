@@ -1,12 +1,15 @@
 //! Generate the precomputed tables.
 
 use core::mem::swap;
-use std::{io, sync::atomic::{AtomicBool, AtomicUsize, Ordering}, thread};
+use std::{io, sync::atomic::{AtomicBool, AtomicUsize, Ordering}};
 use super::*;
 use crate::{
+    EdwardsPoint,
+    RistrettoPoint,
+    Scalar,
     constants::RISTRETTO_BASEPOINT_POINT,
-    traits::Identity,
-    EdwardsPoint, RistrettoPoint, Scalar,
+    ecdlp::{Scheduler, SchedulerScope, TaskHandle},
+    traits::Identity
 };
 
 fn t1_cuckoo_setup<P: ProgressTableGenerationReportFunction>(
@@ -152,7 +155,7 @@ fn create_t2_table<P: ProgressTableGenerationReportFunction>(
     Ok(())
 }
 
-fn create_t1_table_par<P: ProgressTableGenerationReportFunction + Sync>(
+fn create_t1_table_par<S: Scheduler, P: ProgressTableGenerationReportFunction + Sync>(
     l1: usize,
     n_threads: usize,
     dest: &mut [u8],
@@ -169,7 +172,7 @@ fn create_t1_table_par<P: ProgressTableGenerationReportFunction + Sync>(
     // Calculate chunks
     let chunk_size = (j_max + 1).div_ceil(n_threads); // ceiling division
 
-    let all_entries = thread::scope::<_, io::Result<_>>(|s| {
+    let all_entries = S::scope::<_, io::Result<_>>(|s| {
         let handles = (0..n_threads)
             .filter_map(|thread_i| {
                 let start_idx = thread_i * chunk_size;
@@ -262,12 +265,16 @@ fn create_t1_table_par<P: ProgressTableGenerationReportFunction + Sync>(
     Ok(())
 }
 
-fn create_t2_table_par<P: ProgressTableGenerationReportFunction + Sync>(
+fn create_t2_table_par<S, P>(
     l1: usize,
     n_threads: usize,
     dest: &mut [u8],
     progress_report: &P,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    S: Scheduler,
+    P: ProgressTableGenerationReportFunction + Sync,
+{
     let two_to_l1 = EdwardsPoint::mul_base(&Scalar::from(1u32 << l1)).mul_by_cofactor();
     let two_to_l1_affine = AffineMontgomeryPoint::from(&two_to_l1);
 
@@ -281,7 +288,7 @@ fn create_t2_table_par<P: ProgressTableGenerationReportFunction + Sync>(
     // Calculate chunks
     let chunk_size = total_points.div_ceil(n_threads);
 
-    thread::scope::<_, io::Result<()>>(|s| {
+    S::scope::<_, io::Result<()>>(|s| {
         // Split the array into chunks for each thread
         let arr_chunks = coordinates.chunks_mut(chunk_size);
 
@@ -373,8 +380,8 @@ pub fn create_table_file(l1: usize, dest: &mut [u8]) -> io::Result<()> {
 /// To prepare `dest`, you should use an memory mapped file or a 32-byte aligned byte array.
 /// The byte array length should be the return value of [`table_file_len`].
 /// No progress report will be done.
-pub fn create_table_file_par(l1: usize, n_threads: usize, dest: &mut [u8]) -> io::Result<()> {
-    create_table_file_with_progress_report_par(
+pub fn create_table_file_par<S: Scheduler>(l1: usize, n_threads: usize, dest: &mut [u8]) -> io::Result<()> {
+    create_table_file_with_progress_report_par::<S, _>(
         l1,
         n_threads,
         dest,
@@ -401,6 +408,7 @@ pub fn create_table_file_with_progress_report<P: ProgressTableGenerationReportFu
 /// The byte array length should be the return value of [`table_file_len`].
 /// This function will report progress using the provided function.
 pub fn create_table_file_with_progress_report_par<
+    S: Scheduler,
     P: ProgressTableGenerationReportFunction + Sync,
 >(
     l1: usize,
@@ -409,6 +417,6 @@ pub fn create_table_file_with_progress_report_par<
     progress_report: P,
 ) -> io::Result<()> {
     let (t2_bytes, t1_bytes) = dest.split_at_mut(I_MAX * size_of::<T2MontgomeryCoordinates>());
-    create_t2_table_par(l1, n_threads, t2_bytes, &progress_report)?;
-    create_t1_table_par(l1, n_threads, t1_bytes, &progress_report)
+    create_t2_table_par::<S, P>(l1, n_threads, t2_bytes, &progress_report)?;
+    create_t1_table_par::<S, P>(l1, n_threads, t1_bytes, &progress_report)
 }
