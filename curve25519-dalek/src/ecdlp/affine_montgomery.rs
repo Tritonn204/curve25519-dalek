@@ -1,24 +1,29 @@
 use crate::{EdwardsPoint, constants::MONTGOMERY_A, field::FieldElement};
 use std::array;
 
+/// An affine point on a Montgomery curve in (u, v) coordinates.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct AffineMontgomeryPoint {
-    pub u: FieldElement,
-    pub v: FieldElement,
+pub struct AffineMontgomeryPoint {
+    pub(crate) u: FieldElement,
+    pub(crate) v: FieldElement,
 }
 
 impl AffineMontgomeryPoint {
+    /// Check if the point is the identity point (point at infinity) in non-constant time.
     pub fn is_identity_not_ct(&self) -> bool {
         self.u == FieldElement::ZERO && self.v == FieldElement::ZERO
     }
 
+    /// Return the identity point (point at infinity).
+    #[inline(always)]
     pub fn identity() -> Self {
-        AffineMontgomeryPoint {
+        Self {
             u: FieldElement::ZERO,
             v: FieldElement::ZERO,
         }
     }
 
+    /// Create an `AffineMontgomeryPoint` from byte arrays representing the u and v coordinates.
     pub fn from_bytes(u: &[u8; 32], v: &[u8; 32]) -> Self {
         Self {
             u: FieldElement::from_bytes(u),

@@ -1,8 +1,9 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use curve25519_dalek::{
+    EdwardsPoint,
     Scalar,
     constants::RISTRETTO_BASEPOINT_POINT as G,
-    ecdlp::{self, DefaultScheduler, ECDLPArguments, ECDLPTables},
+    ecdlp::{self, AffineMontgomeryPoint, DefaultScheduler, ECDLPArguments, ECDLPTables}
 };
 use rand::{Rng, rng};
 use std::{path::Path, time::Duration};
@@ -229,6 +230,41 @@ fn bench_table_generation(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_montgomery(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Affine Montgomery Point");
+
+    let ed_p1 = EdwardsPoint::mul_base(&Scalar::from(2u64));
+    let ed_p2 = EdwardsPoint::mul_base(&Scalar::from(3u64));
+    let ed_p3 = EdwardsPoint::mul_base(&Scalar::from(5u64));
+    let ed_p4 = EdwardsPoint::mul_base(&Scalar::from(7u64));
+    let ed_addend = EdwardsPoint::mul_base(&Scalar::from(11u64));
+
+    let p1 = AffineMontgomeryPoint::from(&ed_p1);
+    let p2 = AffineMontgomeryPoint::from(&ed_p2);
+    let p3 = AffineMontgomeryPoint::from(&ed_p3);
+    let p4 = AffineMontgomeryPoint::from(&ed_p4);
+    let addend = AffineMontgomeryPoint::from(&ed_addend);
+
+    group.bench_function("add", |b| {
+        b.iter(|| {
+            let points = [p1, p2, p3, p4];
+            for p1 in points.iter() {
+                let _ = black_box(p1).addition_not_ct(black_box(&addend)); 
+            }
+        });
+    });
+
+    group.bench_function("batch add", |b| {
+        b.iter(|| {
+            let mut points = [p1, p2, p3, p4];
+            let _ = AffineMontgomeryPoint::batch_addition_not_ct(black_box(&mut points), black_box(&addend));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(ecdlp, ecdlp_bench);
 criterion_group!(tables, bench_table_generation);
-criterion_main!(ecdlp, tables);
+criterion_group!(montgomery, bench_montgomery);
+criterion_main!(ecdlp, tables, montgomery);

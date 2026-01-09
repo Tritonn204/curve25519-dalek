@@ -95,12 +95,12 @@ use crate::{
     RistrettoPoint, Scalar, constants::MONTGOMERY_A_NEG, constants::RISTRETTO_BASEPOINT_POINT as G,
     field::FieldElement,
 };
-use affine_montgomery::AffineMontgomeryPoint;
 use core::{
     ops::ControlFlow,
     sync::atomic::{AtomicBool, Ordering},
 };
 
+pub use affine_montgomery::AffineMontgomeryPoint;
 pub use scheduler::*;
 pub use table::*;
 
