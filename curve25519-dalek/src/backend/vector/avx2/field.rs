@@ -589,6 +589,64 @@ impl FieldElement2625x4 {
         ])
     }
 
+    /// Square this field element.
+    ///
+    /// # Preconditions
+    ///
+    /// The coefficients of `self` must be bounded with \\( b < 1.5 \\).
+    ///
+    /// # Postconditions
+    ///
+    /// The coefficients of the result are bounded with \\( b < 0.007 \\).
+    #[rustfmt::skip] // keep alignment of z* calculations
+    pub fn square(&self) -> FieldElement2625x4 {
+        #[inline(always)]
+        fn m(x: u32x8, y: u32x8) -> u64x4 {
+            x.mul32(y)
+        }
+
+        #[inline(always)]
+        fn m_lo(x: u32x8, y: u32x8) -> u32x8 {
+            x.mul32(y).into()
+        }
+
+        let v19 = u32x8::new(19, 0, 19, 0, 19, 0, 19, 0);
+
+        let (x0, x1) = unpack_pair(self.0[0]);
+        let (x2, x3) = unpack_pair(self.0[1]);
+        let (x4, x5) = unpack_pair(self.0[2]);
+        let (x6, x7) = unpack_pair(self.0[3]);
+        let (x8, x9) = unpack_pair(self.0[4]);
+
+        let x0_2 = x0.shl::<1>();
+        let x1_2 = x1.shl::<1>();
+        let x2_2 = x2.shl::<1>();
+        let x3_2 = x3.shl::<1>();
+        let x4_2 = x4.shl::<1>();
+        let x5_2 = x5.shl::<1>();
+        let x6_2 = x6.shl::<1>();
+        let x7_2 = x7.shl::<1>();
+
+        let x5_19 = m_lo(v19, x5);
+        let x6_19 = m_lo(v19, x6);
+        let x7_19 = m_lo(v19, x7);
+        let x8_19 = m_lo(v19, x8);
+        let x9_19 = m_lo(v19, x9);
+
+        let z0 = m(x0,   x0) + m(x2_2, x8_19) + m(x4_2, x6_19) + ((m(x1_2, x9_19) +   m(x3_2, x7_19) +    m(x5,   x5_19)).shl::<1>());
+        let z1 = m(x0_2, x1) + m(x3_2, x8_19) + m(x5_2, x6_19) +                    ((m(x2,   x9_19) +    m(x4,   x7_19)).shl::<1>());
+        let z2 = m(x0_2, x2) + m(x1_2,    x1) + m(x4_2, x8_19) +   m(x6,   x6_19) + ((m(x3_2, x9_19) +    m(x5_2, x7_19)).shl::<1>());
+        let z3 = m(x0_2, x3) + m(x1_2,    x2) + m(x5_2, x8_19) +                    ((m(x4,   x9_19) +    m(x6,   x7_19)).shl::<1>());
+        let z4 = m(x0_2, x4) + m(x1_2,  x3_2) + m(x2,      x2) +   m(x6_2, x8_19) + ((m(x5_2, x9_19) +    m(x7,   x7_19)).shl::<1>());
+        let z5 = m(x0_2, x5) + m(x1_2,    x4) + m(x2_2,    x3) +   m(x7_2, x8_19)                    +  ((m(x6,   x9_19)).shl::<1>());
+        let z6 = m(x0_2, x6) + m(x1_2,  x5_2) + m(x2_2,    x4) +   m(x3_2,    x3) +   m(x8,   x8_19) +  ((m(x7_2, x9_19)).shl::<1>());
+        let z7 = m(x0_2, x7) + m(x1_2,    x6) + m(x2_2,    x5) +   m(x3_2,    x4)                    +  ((m(x8,   x9_19)).shl::<1>());
+        let z8 = m(x0_2, x8) + m(x1_2,  x7_2) + m(x2_2,    x6) +   m(x3_2,  x5_2) +   m(x4,      x4) +  ((m(x9,   x9_19)).shl::<1>());
+        let z9 = m(x0_2, x9) + m(x1_2,    x8) + m(x2_2,    x7) +   m(x3_2,    x6) +   m(x4_2,    x5)                                 ;
+
+        FieldElement2625x4::reduce64([z0, z1, z2, z3, z4, z5, z6, z7, z8, z9])
+    }
+
     /// Square this field element, and negate the result's \\(D\\) value.
     ///
     /// # Preconditions
