@@ -593,6 +593,22 @@ impl FieldElement51 {
         }
     }
 
+    /// Subtracts a single `FieldElement51` from each of `FieldElement51`s in place.
+    #[inline(always)]
+    pub fn batch_subtract_n<const N: usize>(a: &mut [Self; N], b: &[Self; N]) {
+        cfg_if! {
+            if #[cfg(target_feature = "avx512ifma")] {
+                Self::batch_subtract_n_avx512(a, b);
+            } else if #[cfg(target_feature = "avx2")] {
+                Self::batch_subtract_n_avx2(a, b);
+            } else {
+                for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                    *ai -= bi;
+                }
+            }
+        }
+    }
+
     /// Adds a single `FieldElement51` to each of `FieldElement51`s in place.
     #[inline(always)]
     pub fn batch_add<const N: usize>(a: &mut [Self; N], b: &Self) {
@@ -604,6 +620,22 @@ impl FieldElement51 {
             } else {
                 for ai in a.iter_mut() {
                     *ai += b;
+                }
+            }
+        }
+    }
+
+    /// Adds a single `FieldElement51` to each of `FieldElement51`s in place.
+    #[inline(always)]
+    pub fn batch_add_n<const N: usize>(a: &mut [Self; N], b: &[Self; N]) {
+        cfg_if! {
+            if #[cfg(target_feature = "avx512ifma")] {
+                Self::batch_add_n_avx512(a, b);
+            } else if #[cfg(target_feature = "avx2")] {
+                Self::batch_add_n_avx2(a, b);
+            } else {
+                for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                    *ai += bi;
                 }
             }
         }
@@ -670,6 +702,33 @@ impl FieldElement51 {
     }
 
     #[cfg(all(target_feature = "avx2", not(target_feature = "avx512ifma")))]
+    #[inline(always)]
+    fn batch_subtract_n_avx2<const N: usize>(a: &mut [Self; N], b: &[Self; N]) {
+        let mut i = 0;
+        while i + 3 < N {
+            let left = FieldElement2625x4::new(&a[i], &a[i + 1], &a[i + 2], &a[i + 3]);
+            let right = FieldElement2625x4::new(&b[i], &b[i + 1], &b[i + 2], &b[i + 3])
+                .neg();
+
+            let result = left + right;
+
+            let results = result.split();
+            a[i] = results[0];
+            a[i + 1] = results[1];
+            a[i + 2] = results[2];
+            a[i + 3] = results[3];
+
+            i += 4;
+        }
+
+        // Handle remaining elements
+        while i < N {
+            a[i] = &a[i] - &b[i];
+            i += 1;
+        }
+    }
+
+    #[cfg(all(target_feature = "avx2", not(target_feature = "avx512ifma")))]
     #[inline]
     fn batch_add_avx2<const N: usize>(a: &mut [Self; N], b: &Self) {
         let mut i = 0;
@@ -691,6 +750,32 @@ impl FieldElement51 {
         // Handle remaining elements
         while i < N {
             a[i] = &a[i] + b;
+            i += 1;
+        }
+    }
+
+    #[cfg(all(target_feature = "avx2", not(target_feature = "avx512ifma")))]
+    #[inline(always)]
+    fn batch_add_n_avx2<const N: usize>(a: &mut [Self; N], b: &[Self; N]) {
+        let mut i = 0;
+        while i + 3 < N {
+            let left = FieldElement2625x4::new(&a[i], &a[i + 1], &a[i + 2], &a[i + 3]);
+            let right = FieldElement2625x4::new(&b[i], &b[i + 1], &b[i + 2], &b[i + 3]);
+
+            let result = left + right;
+
+            let results = result.split();
+            a[i] = results[0];
+            a[i + 1] = results[1];
+            a[i + 2] = results[2];
+            a[i + 3] = results[3];
+
+            i += 4;
+        }
+
+        // Handle remaining elements
+        while i < N {
+            a[i] = &a[i] + &b[i];
             i += 1;
         }
     }
