@@ -263,30 +263,73 @@ fn make_point_iterator(
     normalized: RistrettoPoint,
     num_batches: usize,
 ) -> impl Iterator<Item = (usize, usize, AffineMontgomeryPoint, f64)> {
-    let thread_iter = (0..num_batches).map(move |j| {
-        let progress = j as f64 / num_batches as f64;
-        (j, j * (1 << L2), progress)
-    });
 
     // clear the cofactor, we want the repr to be canonical
     let normalized = RistrettoPoint(normalized.0.mul_by_cofactor());
+    let els_per_batch = 1u64 << (L2 + precomputed_tables.get_l1());
 
-    let els_per_batch: u64 = 1u64 << (L2 + precomputed_tables.get_l1());
-
-    // starting point for this thread
-    let mut target_montgomery = AffineMontgomeryPoint::from(&normalized.0);
+    let target_montgomery = AffineMontgomeryPoint::from(&normalized.0);
     let batch_step = -(els_per_batch as i64);
-    let batch_step_montgomery =
-        AffineMontgomeryPoint::from(&(i64_to_scalar(batch_step) * G).0.mul_by_cofactor());
+    let batch_step_montgomery = AffineMontgomeryPoint::from(&(i64_to_scalar(batch_step) * G).0.mul_by_cofactor());
 
-    thread_iter.map(move |(j, j_start, progress)| {
-        let current = target_montgomery;
+    struct BatchedIterator {
+        current_batch: [AffineMontgomeryPoint; 4],
+        step_x4: AffineMontgomeryPoint,
+        batch_idx: usize,
+        j: usize,
+        num_batches: usize,
+    }
 
-        target_montgomery =
-            AffineMontgomeryPoint::addition_not_ct(&target_montgomery, &batch_step_montgomery);
+    impl Iterator for BatchedIterator {
+        type Item = (usize, usize, AffineMontgomeryPoint, f64);
 
-        (j, j_start, current, progress)
-    })
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.j >= self.num_batches {
+                return None;
+            }
+
+            // Refill batch when we've consumed all 4
+            if self.batch_idx >= 4 && self.j < self.num_batches {
+                // Use 4-way SIMD operation to advance all points by 4
+                self.current_batch = AffineMontgomeryPoint::batch_addition_not_ct(
+                    &self.current_batch,
+                    &self.step_x4
+                );
+                self.batch_idx = 0;
+            }
+
+            let result = (
+                0, // index (not used in ECDLP)
+                self.j * (1 << L2), // j_start
+                self.current_batch[self.batch_idx],
+                self.j as f64 / self.num_batches as f64
+            );
+
+            self.batch_idx += 1;
+            self.j += 1;
+
+            Some(result)
+        }
+    }
+
+    // Initialize first 4 points
+    let p0 = target_montgomery;
+    let p1 = p0.addition_not_ct(&batch_step_montgomery);
+    let p2 = p1.addition_not_ct(&batch_step_montgomery);
+    let p3 = p2.addition_not_ct(&batch_step_montgomery);
+
+    // Pre-compute 4*step
+    let step_x4 = batch_step_montgomery.addition_not_ct(&batch_step_montgomery)
+        .addition_not_ct(&batch_step_montgomery)
+        .addition_not_ct(&batch_step_montgomery);
+
+    BatchedIterator {
+        current_batch: [p0, p1, p2, p3],
+        step_x4,
+        batch_idx: 0,
+        j: 0,
+        num_batches,
+    }
 }
 
 /// Decode a [`RistrettoPoint`] to the represented integer.
@@ -344,11 +387,25 @@ where
 {
     let end_flag = AtomicBool::new(false);
 
+    // Pre compute the T2 cache
+    let mut t2_cache = [AffineMontgomeryPoint::identity(); BATCH_SIZE];
+    let mut t2_cache_alpha = [FieldElement::ZERO; BATCH_SIZE];
+    {
+        let t2_table = precomputed_tables.get_t2();
+        for (i, (cache, alpha)) in t2_cache
+            .iter_mut()
+            .zip(t2_cache_alpha.iter_mut())
+            .enumerate()
+        {
+            let point = t2_table.index(i);
+            *alpha = &MONTGOMERY_A_NEG - &point.u;
+            *cache = point;
+        }
+    }
+
     S::scope(|s| {
         let handles = (0..args.n_threads)
             .map(|thread_i| {
-                use crate::ecdlp::scheduler::SchedulerScope;
-
                 let (offset, normalized, num_batches) =
                     decode_prep(precomputed_tables, point, &args, args.n_threads, thread_i);
 
@@ -367,22 +424,6 @@ where
                         ret
                     }
                 };
-
-                // Pre compute the T2 cache
-                let mut t2_cache = [AffineMontgomeryPoint::identity(); BATCH_SIZE];
-                let mut t2_cache_alpha = [FieldElement::ZERO; BATCH_SIZE];
-                {
-                    let t2_table = precomputed_tables.get_t2();
-                    for (i, (cache, alpha)) in t2_cache
-                        .iter_mut()
-                        .zip(t2_cache_alpha.iter_mut())
-                        .enumerate()
-                    {
-                        let point = t2_table.index(i);
-                        *alpha = &MONTGOMERY_A_NEG - &point.u;
-                        *cache = point;
-                    }
-                }
 
                 s.spawn(move || {
                     let point_iter =
