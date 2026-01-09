@@ -508,13 +508,13 @@ fn fast_ecdlp(
             break 'outer;
         }
 
-        // Z = T2[j]_x - Pm_x
-        for (i, batch) in batch.iter_mut().enumerate() {
-            let j = i + 1;
-            let t2_point = &t2_cache[i];
-            let diff = &t2_point.u - &target_montgomery.u;
+        let mut changes = std::array::from_fn(|i| t2_cache[i].u);
+        FieldElement::batch_subtract::<BATCH_SIZE>(&mut changes, &target_montgomery.u);
 
+        // Z = T2[j]_x - Pm_x
+        for (i, (batch, diff)) in batch.iter_mut().zip(changes.into_iter()).enumerate() {
             if diff.is_zero_not_ct() {
+                let j = i + 1;
                 // Case 1: (Montgomery addition) exceptional case when T2[j] = Pm.
                 // m1 = j * 2^L1, m2 = -j * 2^L1
                 let found =
@@ -526,23 +526,26 @@ fn fast_ecdlp(
                     break 'outer;
                 }
             }
+
             *batch = diff;
         }
 
         // nu = Z^-1
         FieldElement::invert_batch(&mut batch);
 
-        for (batch_i, nu) in batch.iter().enumerate() {
+        let mut alphas = std::array::from_fn(|i| t2_cache_alpha[i]);
+        FieldElement::batch_subtract::<BATCH_SIZE>(&mut alphas, &target_montgomery.u);
+
+        // lambda = (T2[j]_y - Pm_y) * nu
+        // Q_x = lambda^2 - A - T2[j]_x - Pm_x
+        let mut lambdas = std::array::from_fn(|i| t2_cache[i].v);
+        FieldElement::batch_subtract::<BATCH_SIZE>(&mut lambdas, &target_montgomery.v);
+        FieldElement::batch_mul(&mut lambdas, &batch);
+        FieldElement::batch_square(&mut lambdas);
+        FieldElement::batch_add_n::<BATCH_SIZE>(&mut lambdas, &alphas);
+
+        for (batch_i, qx) in lambdas.iter().enumerate() {
             let j = batch_i + 1;
-            // Montgomery addition: general case
-            let t2_point = &t2_cache[batch_i];
-            let alpha = &t2_cache_alpha[batch_i] - &target_montgomery.u;
-
-            // lambda = (T2[j]_y - Pm_y) * nu
-            // Q_x = lambda^2 - A - T2[j]_x - Pm_x
-            let lambda = &(&t2_point.v - &target_montgomery.v) * nu;
-            let qx = &lambda.square() + &alpha;
-
             // Case 3: general case, negative j.
             let j_start_shifted = (j_start as i64 - j as i64) << precomputed_tables.get_l1();
             if t1_table
@@ -557,12 +560,19 @@ fn fast_ecdlp(
                     break 'outer;
                 }
             }
+        }
 
-            // lambda = (p - T2[j]_y - Pm_y) * nu
-            // Q_x = lambda^2 - A - T2[j]_x - Pm_x
-            let lambda = &(&-&t2_point.v - &target_montgomery.v) * nu;
-            let qx = &lambda.square() + &alpha;
+        // Recompute nu for the positive j case
+        // lambda = (T2[j]_y - Pm_y) * nu
+        // Q_x = lambda^2 - A - T2[j]_x - Pm_x
+        let mut lambdas = std::array::from_fn(|i| -&t2_cache[i].v);
+        FieldElement::batch_subtract::<BATCH_SIZE>(&mut lambdas, &target_montgomery.v);
+        FieldElement::batch_mul(&mut lambdas, &batch);
+        FieldElement::batch_square(&mut lambdas);
+        FieldElement::batch_add_n::<BATCH_SIZE>(&mut lambdas, &alphas);
 
+        for (batch_i, qx) in lambdas.iter().enumerate() {
+            let j = batch_i + 1;
             // Case 4: general case, positive j.
             let j_start_shifted = (j_start as i64 + j as i64) << precomputed_tables.get_l1();
             if t1_table
