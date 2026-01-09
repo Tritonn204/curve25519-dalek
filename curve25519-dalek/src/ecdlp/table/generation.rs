@@ -1,15 +1,16 @@
 //! Generate the precomputed tables.
 
-use core::mem::swap;
-use std::{io, sync::atomic::{AtomicBool, AtomicUsize, Ordering}};
 use super::*;
 use crate::{
-    EdwardsPoint,
-    RistrettoPoint,
-    Scalar,
+    EdwardsPoint, RistrettoPoint, Scalar,
     constants::RISTRETTO_BASEPOINT_POINT,
     ecdlp::{Scheduler, SchedulerScope, TaskHandle},
-    traits::Identity
+    traits::Identity,
+};
+use core::mem::swap;
+use std::{
+    io,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 fn t1_cuckoo_setup<P: ProgressTableGenerationReportFunction>(
@@ -20,7 +21,6 @@ fn t1_cuckoo_setup<P: ProgressTableGenerationReportFunction>(
     t1_keys: &mut [u32],
     progress_report: &P,
 ) -> io::Result<()> {
-
     /// Dumb cuckoo rehashing threshold.
     const CUCKOO_MAX_INSERT_SWAPS: usize = 500;
 
@@ -47,8 +47,7 @@ fn t1_cuckoo_setup<P: ProgressTableGenerationReportFunction>(
             let start = (old_hash_id as usize - 1) * 8;
             let end = start + 4;
             let mut key = u32::from_be_bytes(x[end..end + 4].try_into().expect("key u32"));
-            let h1 =
-                u32::from_be_bytes(x[start..start + 4].try_into().expect("h1 u32")) as usize;
+            let h1 = u32::from_be_bytes(x[start..start + 4].try_into().expect("h1 u32")) as usize;
             let h = h1 % cuckoo_len;
 
             if hash_index[h] == 0 {
@@ -186,9 +185,8 @@ fn create_t1_table_par<S: Scheduler, P: ProgressTableGenerationReportFunction + 
                 let progress_counter = &progress_counter;
 
                 Some(s.spawn(move || {
-                    let step = AffineMontgomeryPoint::from(
-                        &RISTRETTO_BASEPOINT_POINT.0.mul_by_cofactor(),
-                    );
+                    let step =
+                        AffineMontgomeryPoint::from(&RISTRETTO_BASEPOINT_POINT.0.mul_by_cofactor());
 
                     // Compute starting point for this chunk
                     let start_point = if start_idx == 0 {
@@ -209,8 +207,8 @@ fn create_t1_table_par<S: Scheduler, P: ProgressTableGenerationReportFunction + 
                             let old_count = progress_counter.fetch_add(1, Ordering::Relaxed);
                             if old_count % 10 == 0 {
                                 let progress = (old_count * report_every) as f64 / j_max as f64;
-                                if let ControlFlow::Break(_) = progress_report
-                                    .report(progress, ReportStep::T1PointsGeneration)
+                                if let ControlFlow::Break(_) =
+                                    progress_report.report(progress, ReportStep::T1PointsGeneration)
                                 {
                                     // Can't easily interrupt from inside thread, would need to add a flag
                                     interrupted.store(true, Ordering::Relaxed);
@@ -231,9 +229,9 @@ fn create_t1_table_par<S: Scheduler, P: ProgressTableGenerationReportFunction + 
         // Wait for all threads to complete
         let mut all_entries = Vec::with_capacity(j_max + 1);
         for handle in handles {
-            let entries = handle.join().map_err(|e| io::Error::other(
-                format!("Thread T1 panicked: {:?}", e)
-            ))?;
+            let entries = handle
+                .join()
+                .map_err(|e| io::Error::other(format!("Thread T1 panicked: {:?}", e)))?;
 
             all_entries.extend(entries);
         }
@@ -308,9 +306,8 @@ where
                 Some(s.spawn(move || {
                     // Calculate starting point: start_offset * two_to_l1
                     let scalar = Scalar::from(start_offset as u64);
-                    let start_point =
-                        EdwardsPoint::mul_base(&(scalar * Scalar::from(1u32 << l1)))
-                            .mul_by_cofactor();
+                    let start_point = EdwardsPoint::mul_base(&(scalar * Scalar::from(1u32 << l1)))
+                        .mul_by_cofactor();
                     let mut acc = AffineMontgomeryPoint::from(&start_point);
 
                     for j in start_offset..end_offset {
@@ -341,9 +338,9 @@ where
 
         // Wait for all threads
         for handle in handles {
-            handle.join().map_err(|e| io::Error::other(
-                format!("Thread T2 panicked: {:?}", e)
-            ))?;
+            handle
+                .join()
+                .map_err(|e| io::Error::other(format!("Thread T2 panicked: {:?}", e)))?;
         }
 
         Ok(())
@@ -380,7 +377,11 @@ pub fn create_table_file(l1: usize, dest: &mut [u8]) -> io::Result<()> {
 /// To prepare `dest`, you should use an memory mapped file or a 32-byte aligned byte array.
 /// The byte array length should be the return value of [`table_file_len`].
 /// No progress report will be done.
-pub fn create_table_file_par<S: Scheduler>(l1: usize, n_threads: usize, dest: &mut [u8]) -> io::Result<()> {
+pub fn create_table_file_par<S: Scheduler>(
+    l1: usize,
+    n_threads: usize,
+    dest: &mut [u8],
+) -> io::Result<()> {
     create_table_file_with_progress_report_par::<S, _>(
         l1,
         n_threads,

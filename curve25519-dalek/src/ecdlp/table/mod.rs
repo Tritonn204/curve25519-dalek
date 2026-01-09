@@ -3,12 +3,9 @@
 
 pub mod generation;
 
-use bytemuck::{Pod, Zeroable};
-use std::{
-    mem::size_of,
-    ops::ControlFlow,
-};
 use crate::{ecdlp::Scheduler, field::FieldElement};
+use bytemuck::{Pod, Zeroable};
+use std::{mem::size_of, ops::ControlFlow};
 
 use super::affine_montgomery::AffineMontgomeryPoint;
 
@@ -21,7 +18,6 @@ pub(crate) const CUCKOO_K: usize = 3; // number of cuckoo lookups before giving 
 
 // Note: file layout is just T2 followed by T1 keys and then T1 values.
 // We just do casts using `bytemuck` since everything are PODs.
-
 
 /// A struct to ensure that the bytes are aligned on 32 bytes.
 /// This is required for the table generation.
@@ -87,7 +83,10 @@ impl ECDLPTables {
     }
 
     /// Generate a new precomputed tables with a progress report function, with multithreading.
-    pub fn generate_with_progress_report_par<S: Scheduler, P: ProgressTableGenerationReportFunction + Sync>(
+    pub fn generate_with_progress_report_par<
+        S: Scheduler,
+        P: ProgressTableGenerationReportFunction + Sync,
+    >(
         l1: usize,
         n_threads: usize,
         p: P,

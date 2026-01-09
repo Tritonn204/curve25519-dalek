@@ -1,5 +1,5 @@
-use std::array;
 use crate::{EdwardsPoint, constants::MONTGOMERY_A, field::FieldElement};
+use std::array;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AffineMontgomeryPoint {
@@ -67,10 +67,7 @@ impl AffineMontgomeryPoint {
     }
 
     /// Add the same point to N different points simultaneously
-    pub fn batch_addition_not_ct<const N: usize>(
-        points: &[Self; N],
-        addend: &Self,
-    ) -> [Self; N] {
+    pub fn batch_addition_not_ct<const N: usize>(points: &[Self; N], addend: &Self) -> [Self; N] {
         // Early exit checks for identity
         if addend.is_identity_not_ct() {
             return *points;
@@ -168,11 +165,17 @@ impl AffineMontgomeryPoint {
         FieldElement::batch_mul(&mut lambdas, &u_diffs_for_v);
 
         // Assemble results
-        for (i, (((u, v), point), mask_val)) in numerators.into_iter().zip(lambdas).zip(points.iter()).zip(mask.iter()).enumerate() {
+        for (i, (((u, v), point), mask_val)) in numerators
+            .into_iter()
+            .zip(lambdas)
+            .zip(points.iter())
+            .zip(mask.iter())
+            .enumerate()
+        {
             if !*mask_val {
                 results[i] = Self {
-                    u: u,
-                    v:  &v - &point.v,
+                    u,
+                    v: &v - &point.v,
                 };
             }
         }
@@ -206,8 +209,8 @@ impl From<&'_ EdwardsPoint> for AffineMontgomeryPoint {
 
 #[cfg(test)]
 mod tests {
-    use crate::Scalar;
     use super::*;
+    use crate::Scalar;
 
     #[test]
     fn test_const_alpha() {
@@ -268,7 +271,7 @@ mod tests {
     fn test_batch_addition_identity_cases() {
         let ed_p1 = EdwardsPoint::mul_base(&Scalar::from(2u64));
         let ed_p2 = EdwardsPoint::mul_base(&Scalar::from(3u64));
-        
+
         let p1 = AffineMontgomeryPoint::from(&ed_p1);
         let p2 = AffineMontgomeryPoint::from(&ed_p2);
         let identity = AffineMontgomeryPoint::identity();
@@ -276,7 +279,7 @@ mod tests {
         // Test adding identity to points
         let points = [p1, p2, identity, p1];
         let batch_results = AffineMontgomeryPoint::batch_addition_not_ct(&points, &identity);
-        
+
         assert_eq!(batch_results[0].u.to_bytes(), p1.u.to_bytes());
         assert_eq!(batch_results[1].u.to_bytes(), p2.u.to_bytes());
         assert_eq!(batch_results[2].u.to_bytes(), identity.u.to_bytes());
@@ -284,10 +287,10 @@ mod tests {
         // Test adding to identity points
         let addend = AffineMontgomeryPoint::from(&ed_p1);
         let points_with_identity = [identity, p2, identity, p1];
-        let batch_results2 = AffineMontgomeryPoint::batch_addition_not_ct(&points_with_identity, &addend);
-        
+        let batch_results2 =
+            AffineMontgomeryPoint::batch_addition_not_ct(&points_with_identity, &addend);
+
         assert_eq!(batch_results2[0].u.to_bytes(), addend.u.to_bytes());
         assert_eq!(batch_results2[0].v.to_bytes(), addend.v.to_bytes());
     }
 }
-

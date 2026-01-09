@@ -10,10 +10,13 @@ use std::{path::Path, time::Duration};
 pub fn ecdlp_bench(c: &mut Criterion) {
     if !Path::new("ecdlp_table.bin").exists() {
         let tables = ECDLPTables::generate(26).expect("Failed to generate ECDLP tables");
-        tables.write_to_file("ecdlp_table.bin").expect("Failed to write ECDLP tables to file");
+        tables
+            .write_to_file("ecdlp_table.bin")
+            .expect("Failed to write ECDLP tables to file");
     }
 
-    let tables = ECDLPTables::load_from_file(26, "ecdlp_table.bin").expect("Failed to load ECDLP tables from file");
+    let tables = ECDLPTables::load_from_file(26, "ecdlp_table.bin")
+        .expect("Failed to load ECDLP tables from file");
     let view = tables.view();
 
     c.bench_function("fast ecdlp non constant time", |b| {
@@ -216,7 +219,10 @@ fn bench_table_generation(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("Parallel", l1), l1, |b, &l1| {
-            b.iter(|| ECDLPTables::generate_par::<DefaultScheduler>(l1, n_threads).expect("Failed to generate ECDLP tables in parallel"));
+            b.iter(|| {
+                ECDLPTables::generate_par::<DefaultScheduler>(l1, n_threads)
+                    .expect("Failed to generate ECDLP tables in parallel")
+            });
         });
     }
 

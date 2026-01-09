@@ -88,13 +88,11 @@ mod ecdlp_notes {
 }
 
 mod affine_montgomery;
-mod table;
 mod scheduler;
+mod table;
 
 use crate::{
-    RistrettoPoint, Scalar,
-    constants::MONTGOMERY_A_NEG,
-    constants::RISTRETTO_BASEPOINT_POINT as G,
+    RistrettoPoint, Scalar, constants::MONTGOMERY_A_NEG, constants::RISTRETTO_BASEPOINT_POINT as G,
     field::FieldElement,
 };
 use affine_montgomery::AffineMontgomeryPoint;
@@ -103,8 +101,8 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub use table::*;
 pub use scheduler::*;
+pub use table::*;
 
 use table::{BATCH_SIZE, L2};
 

@@ -48,8 +48,8 @@ impl<'scope, R> TaskHandle<'scope, R> for ScopedJoinHandle<'scope, R> {
 }
 
 impl<'scope, 'env: 'scope> SchedulerScope<'scope, 'env> for Scope<'scope, 'env> {
-        fn spawn<F, T>(&'scope self, f: F) -> impl TaskHandle<'scope, T>
-        where
+    fn spawn<F, T>(&'scope self, f: F) -> impl TaskHandle<'scope, T>
+    where
         T: Send + 'env,
         F: FnOnce() -> T + Send + 'env,
     {

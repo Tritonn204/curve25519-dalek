@@ -16,12 +16,12 @@
 //! implementation, and was then rewritten to use unsigned limbs instead
 //! of signed limbs.
 
+use cfg_if::cfg_if;
 use core::fmt::Debug;
 use core::ops::Neg;
 use core::ops::{Add, AddAssign};
 use core::ops::{Mul, MulAssign};
 use core::ops::{Sub, SubAssign};
-use cfg_if::cfg_if;
 
 use subtle::Choice;
 use subtle::ConditionallySelectable;
@@ -623,14 +623,14 @@ impl FieldElement2625 {
     #[inline]
     fn batch_subtract_simd<const N: usize>(a: &mut [Self; N], b: &Self) {
         use core::arch::x86_64::*;
-        
+
         let mut i = 0;
         // Process 8 elements at a time using AVX2 (since u32 limbs fit 8 per 256-bit vector)
         while i + 7 < N {
             unsafe {
                 for limb_idx in 0..10 {
                     let b_splat = _mm256_set1_epi32(b.0[limb_idx] as i32);
-                    
+
                     let a_vals = _mm256_set_epi32(
                         a[i + 7].0[limb_idx] as i32,
                         a[i + 6].0[limb_idx] as i32,
@@ -641,7 +641,7 @@ impl FieldElement2625 {
                         a[i + 1].0[limb_idx] as i32,
                         a[i].0[limb_idx] as i32,
                     );
-                    
+
                     // Add 16*p to avoid underflow
                     // limbs 0,2,4,6,8 are 26-bit (bounded by 0x3ffffff), limbs 1,3,5,7,9 are 25-bit (bounded by 0x1ffffff)
                     // limb[0] is special: 0x3ffffed
@@ -652,9 +652,9 @@ impl FieldElement2625 {
                     } else {
                         _mm256_set1_epi32((0x1ffffff << 4) as i32)
                     };
-                    
+
                     let result = _mm256_sub_epi32(_mm256_add_epi32(a_vals, p_multiple), b_splat);
-                    
+
                     let result_arr: [i32; 8] = core::mem::transmute(result);
                     a[i].0[limb_idx] = result_arr[0] as u32;
                     a[i + 1].0[limb_idx] = result_arr[1] as u32;
@@ -665,7 +665,7 @@ impl FieldElement2625 {
                     a[i + 6].0[limb_idx] = result_arr[6] as u32;
                     a[i + 7].0[limb_idx] = result_arr[7] as u32;
                 }
-                
+
                 // Reduce each result after subtraction
                 for j in 0..8 {
                     a[i + j] = Self::reduce([
@@ -684,7 +684,7 @@ impl FieldElement2625 {
             }
             i += 8;
         }
-        
+
         // Handle remaining elements
         while i < N {
             a[i] -= b;
@@ -709,14 +709,14 @@ impl FieldElement2625 {
     #[inline]
     fn batch_add_simd<const N: usize>(a: &mut [Self; N], b: &Self) {
         use core::arch::x86_64::*;
-        
+
         let mut i = 0;
         // Process 8 elements at a time using AVX2
         while i + 7 < N {
             unsafe {
                 for limb_idx in 0..10 {
                     let b_splat = _mm256_set1_epi32(b.0[limb_idx] as i32);
-                    
+
                     let a_vals = _mm256_set_epi32(
                         a[i + 7].0[limb_idx] as i32,
                         a[i + 6].0[limb_idx] as i32,
@@ -727,9 +727,9 @@ impl FieldElement2625 {
                         a[i + 1].0[limb_idx] as i32,
                         a[i].0[limb_idx] as i32,
                     );
-                    
+
                     let result = _mm256_add_epi32(a_vals, b_splat);
-                    
+
                     let result_arr: [i32; 8] = core::mem::transmute(result);
                     a[i].0[limb_idx] = result_arr[0] as u32;
                     a[i + 1].0[limb_idx] = result_arr[1] as u32;
@@ -743,7 +743,7 @@ impl FieldElement2625 {
             }
             i += 8;
         }
-        
+
         // Handle remaining elements
         while i < N {
             a[i] += b;
