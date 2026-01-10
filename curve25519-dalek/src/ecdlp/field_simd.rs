@@ -960,16 +960,32 @@ impl FieldElement {
 
     #[inline]
     pub fn batch_invert_4(elements: &mut [Self; 4]) {
+        if elements[0].is_zero().into()
+            || elements[1].is_zero().into()
+            || elements[2].is_zero().into()
+            || elements[3].is_zero().into()
+        {
+            for e in elements.iter_mut() {
+                let nonzero = !e.is_zero();
+                if bool::from(nonzero) {
+                    *e = e.invert();
+                } else {
+                    *e = Self::ZERO;
+                }
+            }
+            return;
+        }
+
         let mut acc = Self::ONE;
         let mut scratch = [Self::ONE; 4];
-        
+
         for i in 0..4 {
             scratch[i] = acc;
             acc = &acc * &elements[i];
         }
-        
+
         acc = acc.invert();
-        
+
         for i in (0..4).rev() {
             let tmp = &acc * &scratch[i];
             acc = &acc * &elements[i];
