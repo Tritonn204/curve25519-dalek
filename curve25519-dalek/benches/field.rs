@@ -55,19 +55,19 @@ bench_op!(bench_batch_subtract, "batch_subtract", |arr| {
 
 bench_op!(bench_subtract, "subtract", |arr| {
     for fe in arr.iter_mut() {
-        *fe = black_box(&*fe) - black_box(&B);
+        *fe = black_box(black_box(&*fe) - black_box(&B));
     }
 });
 
 bench_op!(bench_add, "add", |arr| {
     for fe in arr.iter_mut() {
-        *fe = black_box(&*fe) + black_box(&B);
+        *fe = black_box(black_box(&*fe) + black_box(&B));
     }
 });
 
 bench_op!(bench_mul, "mul", |arr| {
     for fe in arr.iter_mut() {
-        *fe = black_box(&*fe) * black_box(&B);
+        *fe = black_box(black_box(&*fe) * black_box(&B));
     }
 });
 
