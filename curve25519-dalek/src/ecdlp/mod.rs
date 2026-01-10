@@ -410,70 +410,71 @@ fn make_point_iterator_simd(
     normalized: RistrettoPoint,
     num_batches: usize,
 ) -> impl Iterator<Item = (usize, usize, AffineMontgomeryPoint, f64)> {
-    // Apply same transformations as original make_point_iterator
+    // Same transformations as scalar iterator
     let normalized = RistrettoPoint(normalized.0.mul_by_cofactor());
     let els_per_batch: u64 = 1u64 << (L2 + precomputed_tables.get_l1());
-    
+
     let initial = AffineMontgomeryPoint::from(&normalized.0);
     let batch_step = -(els_per_batch as i64);
     let step = AffineMontgomeryPoint::from(&(i64_to_scalar(batch_step) * G).0.mul_by_cofactor());
-    
+
+    #[inline(always)]
+    fn add4_inplace(batch: &mut [AffineMontgomeryPoint; 4], addend: &AffineMontgomeryPoint) {
+        *batch = AffineMontgomeryPoint::batch_addition_not_ct_4way(batch, addend);
+    }
+
     struct OptimizedIterator {
         current_batch: [AffineMontgomeryPoint; 4],
-        #[allow(dead_code)]
-        step: AffineMontgomeryPoint,
         step_x4: AffineMontgomeryPoint,
         batch_idx: usize,
         j: usize,
         num_batches: usize,
     }
-    
+
     impl Iterator for OptimizedIterator {
         type Item = (usize, usize, AffineMontgomeryPoint, f64);
-        
+
+        #[inline(always)]
         fn next(&mut self) -> Option<Self::Item> {
             if self.j >= self.num_batches {
                 return None;
             }
-            
-            // Refill batch when we've consumed all 4
-            if self.batch_idx >= 4 && self.j < self.num_batches {
-                // Use 4-way SIMD operation to advance all points by 4
-                self.current_batch = AffineMontgomeryPoint::batch_addition_not_ct_4way(
-                    &self.current_batch,
-                    &self.step_x4
-                );
+
+            // Refill after consuming 4 lanes.
+            if self.batch_idx >= 4 {
+                add4_inplace(&mut self.current_batch, &self.step_x4);
                 self.batch_idx = 0;
             }
-            
-            let result = (
-                0, // index (not used in ECDLP)
-                self.j * (1 << L2), // j_start
-                self.current_batch[self.batch_idx],
-                self.j as f64 / self.num_batches as f64
-            );
-            
+
+            // Progress fix: index should advance, not be hardcoded 0.
+            // Use j as a monotone counter (or j_start, either is fine).
+            let index = self.j;
+
+            let j_start = self.j * (1 << L2);
+            let target = self.current_batch[self.batch_idx];
+            let progress = self.j as f64 / self.num_batches as f64;
+
             self.batch_idx += 1;
             self.j += 1;
-            
-            Some(result)
+
+            Some((index, j_start, target, progress))
         }
     }
-    
-    // Initialize first 4 points
+
+    // Initialize first 4 points: P(0..3) = initial + k*step
     let p0 = initial;
     let p1 = p0.addition_not_ct(&step);
     let p2 = p1.addition_not_ct(&step);
     let p3 = p2.addition_not_ct(&step);
-    
-    // Pre-compute 4*step
-    let step_x4 = step.addition_not_ct(&step)
+
+    // Precompute 4*step (one-time cost)
+    let step_x4 = step
+        .addition_not_ct(&step)
         .addition_not_ct(&step)
         .addition_not_ct(&step);
-    
+
     OptimizedIterator {
         current_batch: [p0, p1, p2, p3],
-        step,
         step_x4,
         batch_idx: 0,
         j: 0,
@@ -702,86 +703,6 @@ pub fn par_decode<R: ProgressReportFunction + Sync>(
         found
     })
     } // end cfg(curve25519_dalek_bits = "64")
-}
-
-#[allow(dead_code)]
-fn make_point_iterator_simd_batched(
-    precomputed_tables: &ECDLPTablesFileView<'_>,
-    normalized: RistrettoPoint,
-    num_batches: usize,
-) -> impl Iterator<Item = [(usize, usize, AffineMontgomeryPoint, f64); 4]> {
-    let normalized = RistrettoPoint(normalized.0.mul_by_cofactor());
-    let els_per_batch: u64 = 1u64 << (L2 + precomputed_tables.get_l1());
-    
-    let initial = AffineMontgomeryPoint::from(&normalized.0);
-    let batch_step = -(els_per_batch as i64);
-    let step = AffineMontgomeryPoint::from(&(i64_to_scalar(batch_step) * G).0.mul_by_cofactor());
-    
-    struct BatchedIterator {
-        current_batch: [AffineMontgomeryPoint; 4],
-        step: AffineMontgomeryPoint,
-        step_x4: AffineMontgomeryPoint,
-        j: usize,
-        num_batches: usize,
-    }
-    
-    impl Iterator for BatchedIterator {
-        type Item = [(usize, usize, AffineMontgomeryPoint, f64); 4];
-        
-        fn next(&mut self) -> Option<Self::Item> {
-            if self.j >= self.num_batches {
-                return None;
-            }
-            
-            // Build result array with current batch
-            let mut result = [(0, 0, AffineMontgomeryPoint::identity(), 0.0); 4];
-            let mut count = 0;
-            
-            for i in 0..4 {
-                if self.j < self.num_batches {
-                    result[i] = (
-                        0,
-                        self.j * (1 << L2),
-                        self.current_batch[i],
-                        self.j as f64 / self.num_batches as f64
-                    );
-                    self.j += 1;
-                    count += 1;
-                }
-            }
-            
-            if count == 0 {
-                return None;
-            }
-            
-            // Advance all 4 points for next iteration
-            self.current_batch = AffineMontgomeryPoint::batch_addition_not_ct_4way(
-                &self.current_batch,
-                &self.step_x4
-            );
-            
-            Some(result)
-        }
-    }
-    
-    // Initialize first 4 points
-    let p0 = initial;
-    let p1 = p0.addition_not_ct(&step);
-    let p2 = p1.addition_not_ct(&step);
-    let p3 = p2.addition_not_ct(&step);
-    
-    // Pre-compute 4*step
-    let step_x4 = step.addition_not_ct(&step)
-        .addition_not_ct(&step)
-        .addition_not_ct(&step);
-    
-    BatchedIterator {
-        current_batch: [p0, p1, p2, p3],
-        step,
-        step_x4,
-        j: 0,
-        num_batches,
-    }
 }
 
 pub fn par_decode_scalar<R: ProgressReportFunction + Sync>(
@@ -1118,61 +1039,49 @@ fn batch_field_mul_and_square<const N: usize>(
 
 /// Batch converts multiple i64 values to Scalar types using SIMD where possible
 pub fn batch_i64_to_scalar(inputs: &[i64], outputs: &mut [Scalar]) {
-    {
-        use crate::ecdlp::simd_types::{i64x4};
-        
-        assert_eq!(inputs.len(), outputs.len());
-        let len = inputs.len();
-        let mut pos = 0;
-        
-        // Process in chunks of 4 using SIMD
-        while pos + 4 <= len {
-            // Create SIMD vector from array
-            let values = i64x4::from([
-                inputs[pos],
-                inputs[pos+1],
-                inputs[pos+2],
-                inputs[pos+3],
-            ]);
-            
-            // Manual comparison with bitwise ops
-            // Use cmp_gt with -1 instead of cmp_ge with 0
-            let is_positive = values.cmp_gt(i64x4::splat(-1));
-            
-            // Negate values
-            let neg_values = i64x4::splat(0) - values;
-            
-            // Convert to arrays for manual selection since select isn't available
-            let values_array = values.to_array();
-            let neg_values_array = neg_values.to_array();
-            let is_positive_array = is_positive.to_array();
-            
-            // Process individual conversions
-            for i in 0..4 {
-                // Manual selection based on mask
-                let abs_value = if is_positive_array[i] > 0 {
-                    values_array[i]
-                } else {
-                    neg_values_array[i]
-                };
-                
-                let scalar_pos = Scalar::from(abs_value as u64);
-                
-                // Use the sign mask to determine if we need negation
-                outputs[pos + i] = if is_positive_array[i] > 0 {
-                    scalar_pos
-                } else {
-                    -&scalar_pos
-                };
-            }
-            
-            pos += 4;
+    use crate::ecdlp::simd_types::i64x4;
+
+    assert_eq!(inputs.len(), outputs.len());
+    let len = inputs.len();
+    let mut pos = 0;
+
+    while pos + 4 <= len {
+        let x = i64x4::from([
+            inputs[pos],
+            inputs[pos + 1],
+            inputs[pos + 2],
+            inputs[pos + 3],
+        ]);
+
+        // sign mask: 0 for >=0, -1 for <0 (arithmetic shift)
+        let sign = x >> 63;
+
+        // abs = (x ^ sign) - sign   (works for i64::MIN)
+        let abs_i = (x ^ sign) - sign;
+
+        // determine sign for choosing +/- later (mask lanes are typically all-ones or zero)
+        let is_nonneg = x.cmp_gt(i64x4::splat(-1)); // x >= 0
+
+        let abs_arr = abs_i.to_array();
+        let nonneg_arr = is_nonneg.to_array();
+
+        for lane in 0..4 {
+            let mag = abs_arr[lane] as u64; // safe: abs_i is non-negative in two's complement sense
+            let s = Scalar::from(mag);
+
+            outputs[pos + lane] = if nonneg_arr[lane] != 0 {
+                s
+            } else {
+                -&s
+            };
         }
-        
-        // Handle remaining elements with scalar code
-        for i in pos..len {
-            outputs[i] = i64_to_scalar(inputs[i]);
-        }
+
+        pos += 4;
+    }
+
+    // tail
+    for i in pos..len {
+        outputs[i] = i64_to_scalar(inputs[i]);
     }
 }
 
@@ -1348,86 +1257,112 @@ fn fast_ecdlp_simd(
         // Would use runtime dispatch by caching the path to be taken based on available SIMD width
 
         // 4-lane batch invert inlined
-        {
+        #[inline(always)]
+        fn fe_is_zero_raw(x: &FieldElement) -> bool {
+            // FieldElement([u64; 5])
+            (x.0[0] | x.0[1] | x.0[2] | x.0[3] | x.0[4]) == 0
+        }
+
+        // Build Z = T2[j].u - target.u AND detect any zero-diff in the same pass.
+        let mut any_zero = false;
+        for i in 0..BATCH_SIZE {
+            any_zero |= fe_is_zero_raw(&batch[i]);
+        }
+        
+        // Invert Z -> nu, safely
+        if any_zero {
+            // Optional but recommended for correctness parity with scalar Case 1:
+            // If Z[j] == 0 then T2[j] == target, so m = ±j * 2^L1 (relative to j_start).
+            for i in 0..BATCH_SIZE {
+                if fe_is_zero_raw(&batch[i]) {
+                    let j = i + 1;
+                    let m_pos = (j_start as i64 + j as i64) << l1;
+                    let m_neg = (j_start as i64 - j as i64) << l1;
+
+                    if consider_candidate(m_pos) || consider_candidate(m_neg) {
+                        if !pseudo_constant_time {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+
+            // Safe per-element inversion (rare path)
+            for i in 0..BATCH_SIZE {
+                if !fe_is_zero_raw(&batch[i]) {
+                    batch[i] = batch[i].invert();
+                } else {
+                    batch[i] = FieldElement::ZERO;
+                }
+            }
+        } else {
             const NUM_CHUNKS: usize = BATCH_SIZE / 4;
-            
-            // Pre-allocated scratch space (could be passed in as parameter to avoid allocation)
+
             let mut scratch = [FieldElement::ONE; NUM_CHUNKS * 4];
-            
-            // 4 parallel accumulators
             let mut acc_lanes = [FieldElement::ONE; 4];
-            
+
             // Forward pass
             for chunk_idx in 0..NUM_CHUNKS {
                 let base = chunk_idx * 4;
                 let scratch_base = chunk_idx * 4;
-                
-                // Store current accumulators
-                scratch[scratch_base] = acc_lanes[0];
+
+                scratch[scratch_base]     = acc_lanes[0];
                 scratch[scratch_base + 1] = acc_lanes[1];
                 scratch[scratch_base + 2] = acc_lanes[2];
                 scratch[scratch_base + 3] = acc_lanes[3];
-                
-                // Load input chunk directly from batch
+
                 let input_chunk = [
                     batch[base],
                     batch[base + 1],
                     batch[base + 2],
                     batch[base + 3],
                 ];
-                
-                // Update accumulators using SIMD
+
                 acc_lanes = FieldElement::batch_mul_4way(&acc_lanes, &input_chunk);
             }
-            
+
             // Combined inversion approach
             let p01 = &acc_lanes[0] * &acc_lanes[1];
             let p23 = &acc_lanes[2] * &acc_lanes[3];
-            let p0123 = &p01 * &p23;
-            let inv_p0123 = p0123.invert();
-            
-            // Extract individual inverses
+            let inv_p0123 = (&p01 * &p23).invert();
+
             let factors = [
                 &acc_lanes[1] * &p23,
                 &acc_lanes[0] * &p23,
                 &p01 * &acc_lanes[3],
                 &p01 * &acc_lanes[2],
             ];
-            
-            let inv_broadcast = [inv_p0123; 4];
-            acc_lanes = FieldElement::batch_mul_4way(&inv_broadcast, &factors);
-            
+
+            acc_lanes = FieldElement::batch_mul_4way(&[inv_p0123; 4], &factors);
+
             // Reverse pass
             for chunk_idx in (0..NUM_CHUNKS).rev() {
                 let base = chunk_idx * 4;
                 let scratch_base = chunk_idx * 4;
-                
-                // Load input chunk
+
+                // Capture original inputs before overwrite
                 let input_chunk = [
                     batch[base],
                     batch[base + 1],
                     batch[base + 2],
                     batch[base + 3],
                 ];
-                
-                // Load scratch chunk
+
                 let scratch_chunk = [
                     scratch[scratch_base],
                     scratch[scratch_base + 1],
                     scratch[scratch_base + 2],
                     scratch[scratch_base + 3],
                 ];
-                
-                // Compute results using SIMD
+
                 let results = FieldElement::batch_mul_4way(&acc_lanes, &scratch_chunk);
-                
-                // Store results back to batch
-                batch[base] = results[0];
+
+                batch[base]     = results[0];
                 batch[base + 1] = results[1];
                 batch[base + 2] = results[2];
                 batch[base + 3] = results[3];
-                
-                // Update accumulators using SIMD
+
+                // Update with ORIGINAL input chunk
                 acc_lanes = FieldElement::batch_mul_4way(&acc_lanes, &input_chunk);
             }
         }
