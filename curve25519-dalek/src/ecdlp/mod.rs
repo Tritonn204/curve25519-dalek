@@ -991,44 +991,25 @@ pub fn batch_field_add<const N: usize>(
 
 #[inline(always)]
 #[allow(dead_code)]
-fn batch_field_mul_and_square<const N: usize>(
+fn batch_field_mul_and_square<const N: usize, const CHUNK: usize>(
     output: &mut [FieldElement; N],
     a: &[FieldElement; N],
     b: &[FieldElement; N],
 ) {
     let mut pos = 0;
 
-    #[cfg(curve25519_dalek_bits = "64")]
-    {
-        const CHUNK_SIZE: usize = 4;
-        while pos + CHUNK_SIZE <= N {
-            let a_chunk: &[FieldElement; 4] = (&a[pos..pos + 4]).try_into().unwrap();
-            let b_chunk: &[FieldElement; 4] = (&b[pos..pos + 4]).try_into().unwrap();
-            
-            let products = FieldElement::batch_mul_4way(a_chunk, b_chunk);
-            let squared = FieldElement::batch_square_4way(&products);
-            
-            output[pos..pos + 4].copy_from_slice(&squared);
-            pos += CHUNK_SIZE;
-        }
+    while pos + CHUNK <= N {
+        let a_chunk: &[FieldElement; CHUNK] = (&a[pos..pos + CHUNK]).try_into().unwrap();
+        let b_chunk: &[FieldElement; CHUNK] = (&b[pos..pos + CHUNK]).try_into().unwrap();
+
+        let products = FieldElement::batch_mul(a_chunk, b_chunk);
+        let squared = FieldElement::batch_square(&products);
+
+        output[pos..pos + CHUNK].copy_from_slice(&squared);
+        pos += CHUNK;
     }
 
-    #[cfg(curve25519_dalek_bits = "32")]
-    {
-        const CHUNK_SIZE: usize = 8;
-        while pos + CHUNK_SIZE <= N {
-            let a_chunk: &[FieldElement; 8] = (&a[pos..pos + 8]).try_into().unwrap();
-            let b_chunk: &[FieldElement; 8] = (&b[pos..pos + 8]).try_into().unwrap();
-            
-            let products = FieldElement::batch_mul_8way(a_chunk, b_chunk);
-            let squared = FieldElement::batch_square_8way(&products);
-            
-            output[pos..pos + 8].copy_from_slice(&squared);
-            pos += CHUNK_SIZE;
-        }
-    }
-
-    // Scalar fallback for remaining elements or when SIMD not available
+    // Scalar fallback
     while pos < N {
         output[pos] = (&a[pos] * &b[pos]).square();
         pos += 1;
@@ -1164,40 +1145,6 @@ fn fast_ecdlp_simd(
     qxs: &mut [FieldElement; BATCH_SIZE],
     neg_qxs: &mut [FieldElement; BATCH_SIZE],
 ) -> Option<u64> {
-    // These SIMD helper functions are defined within the multiversion scope,
-    // so they get recompiled with the correct target features for each variant.
-
-    #[inline(always)]
-    fn batch_field_mul_and_square_inline<const N: usize>(
-        output: &mut [FieldElement; N],
-        a: &[FieldElement; N],
-        b: &[FieldElement; N],
-    ) {
-        let mut pos = 0;
-
-        cfg_if! {
-            if #[cfg(all(curve25519_dalek_bits = "64", target_feature = "avx2"))] {
-                const CHUNK_SIZE: usize = 4;
-                while pos + CHUNK_SIZE <= N {
-                    let a_chunk: &[FieldElement; 4] = (&a[pos..pos + 4]).try_into().unwrap();
-                    let b_chunk: &[FieldElement; 4] = (&b[pos..pos + 4]).try_into().unwrap();
-
-                    let products = FieldElement::batch_mul_4way(a_chunk, b_chunk);
-                    let squared = FieldElement::batch_square_4way(&products);
-
-                    output[pos..pos + 4].copy_from_slice(&squared);
-                    pos += CHUNK_SIZE;
-                }
-            }
-        }
-
-        // Scalar fallback for remaining elements or when SIMD not available
-        while pos < N {
-            output[pos] = (&a[pos] * &b[pos]).square();
-            pos += 1;
-        }
-    }
-
     let t1_table = precomputed_tables.get_t1();
 
     let mut found = None;
@@ -1316,7 +1263,7 @@ fn fast_ecdlp_simd(
                     batch[base + 3],
                 ];
 
-                acc_lanes = FieldElement::batch_mul_4way(&acc_lanes, &input_chunk);
+                acc_lanes = FieldElement::batch_mul::<4>(&acc_lanes, &input_chunk);
             }
 
             // Combined inversion approach
@@ -1331,7 +1278,7 @@ fn fast_ecdlp_simd(
                 &p01 * &acc_lanes[2],
             ];
 
-            acc_lanes = FieldElement::batch_mul_4way(&[inv_p0123; 4], &factors);
+            acc_lanes = FieldElement::batch_mul::<4>(&[inv_p0123; 4], &factors);
 
             // Reverse pass
             for chunk_idx in (0..NUM_CHUNKS).rev() {
@@ -1353,7 +1300,7 @@ fn fast_ecdlp_simd(
                     scratch[scratch_base + 3],
                 ];
 
-                let results = FieldElement::batch_mul_4way(&acc_lanes, &scratch_chunk);
+                let results = FieldElement::batch_mul::<4>(&acc_lanes, &scratch_chunk);
 
                 batch[base]     = results[0];
                 batch[base + 1] = results[1];
@@ -1361,7 +1308,7 @@ fn fast_ecdlp_simd(
                 batch[base + 3] = results[3];
 
                 // Update with ORIGINAL input chunk
-                acc_lanes = FieldElement::batch_mul_4way(&acc_lanes, &input_chunk);
+                acc_lanes = FieldElement::batch_mul::<4>(&acc_lanes, &input_chunk);
             }
         }
     
@@ -1374,7 +1321,7 @@ fn fast_ecdlp_simd(
         // Batch compute qxs for the regular case
         // lambda = (T2[j]_y - Pm_y) * nu
         batch_field_subtract(qx_tmp, &t2_vs, &target_montgomery.v);
-        batch_field_mul_and_square_inline(qx_out, &qx_tmp, &batch);
+        batch_field_mul_and_square::<BATCH_SIZE, 4>(qx_out, &qx_tmp, &batch);
         batch_field_add(qx_tmp, &qx_out, alphas);
 
         // Process in groups of 8
@@ -1412,7 +1359,7 @@ fn fast_ecdlp_simd(
         }
 
         batch_field_subtract(qx_tmp, &t2_vs_neg, &target_montgomery.v);
-        batch_field_mul_and_square_inline(qx_out, &qx_tmp, &batch);
+        batch_field_mul_and_square::<BATCH_SIZE, 4>(qx_out, &qx_tmp, &batch);
         batch_field_add(qx_tmp, &qx_out, alphas);
 
         // Process in groups of 8

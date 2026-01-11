@@ -84,8 +84,8 @@ impl AffineMontgomeryPoint {
 
         // 2) Compute u_coords = u - addend.u, v_coords = v + addend.v
         // (keep originals around like generic)
-        let u_diffs = FieldElement::batch_subtract_4way(&u_origin, &addend.u); // returns [FE;4]
-        let v_sums  = FieldElement::batch_add_4way(&v_origin, &addend.v);      // returns [FE;4]
+        let u_diffs = FieldElement::batch_sub::<4>(&u_origin, &addend.u); // returns [FE;4]
+        let v_sums  = FieldElement::batch_add::<4>(&v_origin, &addend.v);      // returns [FE;4]
 
         // 3) Build denominators/numerators + masks (same branching structure as generic)
         let mut denominators = [FieldElement::ZERO; 4];
@@ -131,13 +131,13 @@ impl AffineMontgomeryPoint {
         FieldElement::batch_invert_4(&mut inv_denominators);
 
         // 5) lambdas = numerators * inv_denominators
-        let lambdas = FieldElement::batch_mul_4way(&numerators, &inv_denominators);
+        let lambdas = FieldElement::batch_mul::<4>(&numerators, &inv_denominators);
 
         // 6) u3 = lambda^2 - A - (u1 + u2)
-        let lambda_sq = FieldElement::batch_square_4way(&lambdas);
+        let lambda_sq = FieldElement::batch_square::<4>(&lambdas);
 
         // u1 + u2 (u2 is addend.u broadcast)
-        let u_plus_addend = FieldElement::batch_add_4way(&u_origin, &addend.u);
+        let u_plus_addend = FieldElement::batch_add::<4>(&u_origin, &addend.u);
 
         // lambda_sq - A
         let mut new_u = lambda_sq;
@@ -149,9 +149,9 @@ impl AffineMontgomeryPoint {
         }
 
         // 7) v3 = lambda*(u1 - u3) - v1
-        let u1_minus_u3 = FieldElement::batch_subtract_4way_vec(&u_origin, &new_u);
-        let lambda_times = FieldElement::batch_mul_4way(&lambdas, &u1_minus_u3);
-        let new_v = FieldElement::batch_subtract_4way_vec(&lambda_times, &v_origin);
+        let u1_minus_u3 = FieldElement::batch_vecsub::<4>(&u_origin, &new_u);
+        let lambda_times = FieldElement::batch_mul::<4>(&lambdas, &u1_minus_u3);
+        let new_v = FieldElement::batch_vecsub::<4>(&lambda_times, &v_origin);
 
         // 8) Assemble
         for i in 0..4 {

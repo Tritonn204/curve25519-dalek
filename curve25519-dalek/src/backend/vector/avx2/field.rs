@@ -917,7 +917,7 @@ impl FieldElement51x4 {
     }
 
     /// Multiply 4 pairs of field elements simultaneously
-    /// Uses the exact logic from field_simd.rs batch_mul_4way_64bit
+    /// Uses the exact logic from field_simd.rs batch_mul::<4>_64bit
     #[inline(always)]
     pub fn mul(a_batch: &[FieldElement51; 4], b_batch: &[FieldElement51; 4]) -> [FieldElement51; 4] {
         const LOW_51: u64 = (1 << 51) - 1;
@@ -1104,7 +1104,7 @@ impl FieldElement51x4 {
     }
 
     /// Square 4 field elements simultaneously
-    /// Uses the exact logic from field_simd.rs batch_square_4way_64bit
+    /// Uses the exact logic from field_simd.rs batch_square::<4>_64bit
     #[inline(always)]
     pub fn square(a_batch: &[FieldElement51; 4]) -> [FieldElement51; 4] {
         const LOW_51: u64 = (1 << 51) - 1;
