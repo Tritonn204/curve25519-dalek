@@ -639,6 +639,17 @@ impl FieldElement51 {
         output
     }
 
+    /// Batch element-wise vector subtraction: a[i] - b[i] for fixed-size arrays
+    #[inline]
+    pub(crate) fn batch_vecadd<const N: usize>(
+        a_batch: &[FieldElement51; N],
+        b_batch: &[FieldElement51; N],
+    ) -> [FieldElement51; N] {
+        let mut output = [FieldElement51::ZERO; N];
+        batch_vecadd_dispatch(a_batch.as_slice(), b_batch.as_slice(), output.as_mut_slice());
+        output
+    }
+
     /// Batch invert (NOT constant-time).
     ///
     /// - If any input is zero: inverts each nonzero individually, sets zeros to ZERO.
@@ -648,127 +659,280 @@ impl FieldElement51 {
     /// to use AVX2 when available.
     #[inline]
     pub(crate) fn batch_invert_not_ct<const BATCH_SIZE: usize>(batch: &mut [Self; BATCH_SIZE]) {
-        debug_assert!(BATCH_SIZE % 4 == 0);
-
-        // Non-x86_64 portable fallback: same algorithm, no multiversion.
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            Self::batch_invert_not_ct_core::<BATCH_SIZE>(batch);
-            return;
-        }
-
-        // x86_64 multiversion dispatch
-        #[cfg(target_arch = "x86_64")]
-        {
-            batch_invert_not_ct_dispatch::<BATCH_SIZE>(batch);
-        }
+        batch_invert_not_ct_dispatch::<BATCH_SIZE>(batch);
     }
 
-    #[inline(always)]
-    fn batch_invert_not_ct_core<const BATCH_SIZE: usize>(batch: &mut [Self; BATCH_SIZE]) {
-        debug_assert!(BATCH_SIZE % 4 == 0);
-
+    /// SIMD-striped batch inversion with configurable lane width
+    #[inline]
+    fn batch_invert_with_lanes<const BATCH_SIZE: usize, const LANES: usize>(
+        batch: &mut [Self; BATCH_SIZE]
+    ) {
+        // Handle zero elements
         let mut zero_mask = [false; BATCH_SIZE];
         let mut any_zero = false;
-
+        for i in 0..BATCH_SIZE {
+            if batch[i] == Self::ZERO {
+                zero_mask[i] = true;
+                any_zero = true;
+            }
+        }
+        
         if any_zero {
             for i in 0..BATCH_SIZE {
-                if !zero_mask[i] {
-                    batch[i] = batch[i].invert();
+                batch[i] = if !zero_mask[i] {
+                    batch[i].invert()
                 } else {
-                    batch[i] = Self::ZERO;
-                }
+                    Self::ZERO
+                };
             }
             return;
         }
-
-        // Nonzero case: 4-lane batch inversion across the whole batch.
-        let num_chunks = BATCH_SIZE / 4;
-
-        // scratch holds the lane-wise prefix products for every element.
-        // length = NUM_CHUNKS * 4 == BATCH_SIZE
-        let mut scratch = [Self::ONE; BATCH_SIZE];
-
-        // One accumulator per lane
-        let mut acc_lanes = [Self::ONE; 4];
-
-        // Forward pass
-        for chunk_idx in 0..num_chunks {
-            let base = chunk_idx * 4;
-
-            scratch[base]     = acc_lanes[0];
-            scratch[base + 1] = acc_lanes[1];
-            scratch[base + 2] = acc_lanes[2];
-            scratch[base + 3] = acc_lanes[3];
-
-            let input_chunk = [
-                batch[base],
-                batch[base + 1],
-                batch[base + 2],
-                batch[base + 3],
-            ];
-
-            // SIMD wins happen here (if batch_mul::<4> is multiversioned).
-            acc_lanes = Self::batch_mul::<4>(&acc_lanes, &input_chunk);
+        
+        // Split into full chunks and remainder
+        let num_full_chunks = BATCH_SIZE / LANES;
+        let remainder = BATCH_SIZE % LANES;
+        
+        // Process full chunks with LANES-wide striped inversion
+        if num_full_chunks > 0 {
+            let full_batch_size = num_full_chunks * LANES;
+            Self::batch_invert_striped::<LANES>(
+                &mut batch[..full_batch_size]
+            );
         }
+        
+        // Process remainder
+        if remainder > 0 {
+            Self::batch_invert_remainder::<LANES>(
+                &mut batch[num_full_chunks * LANES..],
+                remainder
+            );
+        }
+    }
 
-        // Invert product of lane accumulators (1 inversion total)
-        let p01 = &acc_lanes[0] * &acc_lanes[1];
-        let p23 = &acc_lanes[2] * &acc_lanes[3];
-        let inv_p0123 = (&p01 * &p23).invert();
-
-        // Compute lane-specific factors so we can get inv(acc_lanes[k]) without extra inversions
-        let factors = [
-            &acc_lanes[1] * &p23, // = acc1 * acc2 * acc3
-            &acc_lanes[0] * &p23, // = acc0 * acc2 * acc3
-            &p01 * &acc_lanes[3], // = acc0 * acc1 * acc3
-            &p01 * &acc_lanes[2], // = acc0 * acc1 * acc2
-        ];
-
-        // acc_lanes[k] becomes inv(original acc_lanes[k])
-        acc_lanes = Self::batch_mul::<4>(&[inv_p0123; 4], &factors);
-
-        // Reverse pass
+    /// Core SIMD-striped batch inversion
+    /// Requires: batch.len() % LANES == 0
+    #[inline(always)]
+    fn batch_invert_striped<const LANES: usize>(batch: &mut [Self]) {
+        let batch_size = batch.len();
+        debug_assert_eq!(batch_size % LANES, 0);
+        
+        let num_chunks = batch_size / LANES;
+        
+        // Scratch holds the per-lane prefix products for each element
+        let mut scratch = vec![Self::ONE; batch_size];
+        
+        // Lane accumulators: acc[k] = product of all x[i] where i % LANES == k
+        let mut acc_lanes = [Self::ONE; LANES];
+        
+        // Forward pass: build striped prefix products
+        for chunk_idx in 0..num_chunks {
+            let base = chunk_idx * LANES;
+            
+            // Store current lane accumulators as prefix products
+            for lane in 0..LANES {
+                scratch[base + lane] = acc_lanes[lane];
+            }
+            
+            // Load current chunk
+            let mut input_chunk = [Self::ZERO; LANES];
+            for lane in 0..LANES {
+                input_chunk[lane] = batch[base + lane];
+            }
+            
+            // Vectorized multiply: acc_lanes *= input_chunk
+            acc_lanes = Self::batch_mul::<LANES>(&acc_lanes, &input_chunk);
+        }
+        
+        // Invert the product of all lane accumulators (1 inversion total)
+        let inv_acc_lanes = Self::invert_lane_product::<LANES>(&acc_lanes);
+        acc_lanes = inv_acc_lanes;
+        
+        // Reverse pass: compute individual inverses
         for chunk_idx in (0..num_chunks).rev() {
-            let base = chunk_idx * 4;
-
+            let base = chunk_idx * LANES;
+            
             // Capture original inputs before overwrite
-            let input_chunk = [
-                batch[base],
-                batch[base + 1],
-                batch[base + 2],
-                batch[base + 3],
-            ];
+            let mut input_chunk = [Self::ZERO; LANES];
+            let mut scratch_chunk = [Self::ZERO; LANES];
+            for lane in 0..LANES {
+                input_chunk[lane] = batch[base + lane];
+                scratch_chunk[lane] = scratch[base + lane];
+            }
+            
+            // Compute inverses: x[i]⁻¹ = inv(acc_lane[i % LANES]) × scratch[i]
+            let results = Self::batch_mul::<LANES>(&acc_lanes, &scratch_chunk);
+            
+            // Write results
+            for lane in 0..LANES {
+                batch[base + lane] = results[lane];
+            }
+            
+            // Update lane accumulators for next iteration
+            acc_lanes = Self::batch_mul::<LANES>(&acc_lanes, &input_chunk);
+        }
+    }
 
-            let scratch_chunk = [
-                scratch[base],
-                scratch[base + 1],
-                scratch[base + 2],
-                scratch[base + 3],
-            ];
+    /// Invert the product of lane accumulators using Montgomery's trick
+    /// Returns [inv(acc[0]), inv(acc[1]), ..., inv(acc[LANES-1])]
+    #[inline(always)]
+    fn invert_lane_product<const LANES: usize>(
+        acc_lanes: &[Self; LANES]
+    ) -> [Self; LANES] {
+        // Dispatch to monomorphized implementations
+        // The compiler will optimize away the unused branches for each LANES value
+        
+        if LANES == 1 {
+            let mut result = [Self::ZERO; LANES];
+            result[0] = acc_lanes[0].invert();
+            result
+        } else if LANES == 2 {
+            let mut result = [Self::ZERO; LANES];
+            let prod = &acc_lanes[0] * &acc_lanes[1];
+            let inv_prod = prod.invert();
+            result[0] = &inv_prod * &acc_lanes[1];
+            result[1] = &inv_prod * &acc_lanes[0];
+            result
+        } else if LANES == 4 {
+            let mut result = [Self::ZERO; LANES];
+            
+            let p01 = &acc_lanes[0] * &acc_lanes[1];
+            let p23 = &acc_lanes[2] * &acc_lanes[3];
+            let inv_total = (&p01 * &p23).invert();
+            
+            // factors[k] = product of all acc_lanes except acc_lanes[k]
+            let f0 = &acc_lanes[1] * &p23;
+            let f1 = &acc_lanes[0] * &p23;
+            let f2 = &p01 * &acc_lanes[3];
+            let f3 = &p01 * &acc_lanes[2];
+            
+            result[0] = &inv_total * &f0;
+            result[1] = &inv_total * &f1;
+            result[2] = &inv_total * &f2;
+            result[3] = &inv_total * &f3;
+            result
+        } else if LANES == 8 {
+            let mut result = [Self::ZERO; LANES];
+            
+            let p01 = &acc_lanes[0] * &acc_lanes[1];
+            let p23 = &acc_lanes[2] * &acc_lanes[3];
+            let p45 = &acc_lanes[4] * &acc_lanes[5];
+            let p67 = &acc_lanes[6] * &acc_lanes[7];
+            
+            let p0123 = &p01 * &p23;
+            let p4567 = &p45 * &p67;
+            
+            let inv_total = (&p0123 * &p4567).invert();
+            
+            // Precompute common subexpressions
+            let p23_p4567 = &p23 * &p4567;
+            let p01_p4567 = &p01 * &p4567;
+            let p67_p0123 = &p67 * &p0123;
+            let p45_p0123 = &p45 * &p0123;
+            
+            result[0] = &inv_total * &(&acc_lanes[1] * &p23_p4567);
+            result[1] = &inv_total * &(&acc_lanes[0] * &p23_p4567);
+            result[2] = &inv_total * &(&acc_lanes[3] * &p01_p4567);
+            result[3] = &inv_total * &(&acc_lanes[2] * &p01_p4567);
+            result[4] = &inv_total * &(&acc_lanes[5] * &p67_p0123);
+            result[5] = &inv_total * &(&acc_lanes[4] * &p67_p0123);
+            result[6] = &inv_total * &(&acc_lanes[7] * &p45_p0123);
+            result[7] = &inv_total * &(&acc_lanes[6] * &p45_p0123);
+            result
+        } else {
+            // Generic path for arbitrary LANES
+            let mut prefix = [Self::ONE; LANES];
+            let mut prod = Self::ONE;
+            for i in 0..LANES {
+                prefix[i] = prod;
+                prod = &prod * &acc_lanes[i];
+            }
+            
+            let inv_total = prod.invert();
+            let mut result = [Self::ZERO; LANES];
+            let mut suffix = inv_total;
+            
+            for i in (0..LANES).rev() {
+                result[i] = &prefix[i] * &suffix;
+                suffix = &suffix * &acc_lanes[i];
+            }
+            
+            result
+        }
+    }
 
-            // inv(x_i) = inv(prefix_lane) * prefix_before_i
-            let results = Self::batch_mul::<4>(&acc_lanes, &scratch_chunk);
-
-            batch[base]     = results[0];
-            batch[base + 1] = results[1];
-            batch[base + 2] = results[2];
-            batch[base + 3] = results[3];
-
-            // Update lane accumulators by multiplying back the original inputs
-            acc_lanes = Self::batch_mul::<4>(&acc_lanes, &input_chunk);
+    /// Handle remainder elements that don't fill a complete SIMD lane
+    #[inline(always)]
+    fn batch_invert_remainder<const LANES: usize>(
+        remainder_batch: &mut [Self],
+        count: usize
+    ) {
+        debug_assert!(count > 0 && count < LANES);
+        
+        match count {
+            1 => {
+                remainder_batch[0] = remainder_batch[0].invert();
+            }
+            2 if LANES >= 2 => {
+                // Use 2-lane striped inversion
+                let mut pair = [remainder_batch[0], remainder_batch[1]];
+                Self::batch_invert_striped::<2>(&mut pair);
+                remainder_batch[0] = pair[0];
+                remainder_batch[1] = pair[1];
+            }
+            3 if LANES == 4 => {
+                // Pad with ONE (identity element) to fill 4-lane chunk
+                let mut padded = [
+                    remainder_batch[0],
+                    remainder_batch[1],
+                    remainder_batch[2],
+                    Self::ONE,
+                ];
+                Self::batch_invert_striped::<4>(&mut padded);
+                remainder_batch[0] = padded[0];
+                remainder_batch[1] = padded[1];
+                remainder_batch[2] = padded[2];
+                // padded[3] should be ONE⁻¹ = ONE, we discard it
+            }
+            _ => {
+                // Scalar fallback for other cases
+                for i in 0..count {
+                    remainder_batch[i] = remainder_batch[i].invert();
+                }
+            }
         }
     }
 }
 
-
-#[cfg(target_arch = "x86_64")]
-#[multiversion(targets("x86_64+sse2", "x86_64+avx2"))]
+#[multiversion(targets("x86_64+sse2", "x86_64+avx2", "aarch64+neon"))]
 #[inline]
 fn batch_invert_not_ct_dispatch<const BATCH_SIZE: usize>(batch: &mut [FieldElement51; BATCH_SIZE]) {
-    FieldElement51::batch_invert_not_ct_core::<BATCH_SIZE>(batch);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && BATCH_SIZE >= 4 {
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 4>(batch);
+            return;
+        }
+        if BATCH_SIZE >= 2 {
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2>(batch);
+            return;
+        }
+    }
+    
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        if BATCH_SIZE >= 2 {
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2>(batch);
+            return;
+        }
+    }
+    
+    // Scalar fallback or single element
+    if BATCH_SIZE == 1 {
+        batch[0] = batch[0].invert();
+    } else {
+        FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2>(batch);
+    }
 }
-
 
 
 #[multiversion(targets("x86_64+sse2", "x86_64+avx2"))]
@@ -825,10 +989,10 @@ fn batch_add_simd_avx2(batch: &[FieldElement51], target: &FieldElement51, output
             r3.0[limb_idx] = sum_array[3];
         }
 
-        output[base] = &r0 + &FieldElement51::ZERO;
-        output[base + 1] = &r1 + &FieldElement51::ZERO;
-        output[base + 2] = &r2 + &FieldElement51::ZERO;
-        output[base + 3] = &r3 + &FieldElement51::ZERO;
+        output[base] = r0;
+        output[base + 1] = r1;
+        output[base + 2] = r2;
+        output[base + 3] = r3;
     }
 
     // Process remainder with scalar
@@ -916,6 +1080,82 @@ fn batch_vecsub_simd_avx2(a_batch: &[FieldElement51], b_batch: &[FieldElement51]
     for i in 0..remainder {
         let idx = chunks * 4 + i;
         output[idx] = &a_batch[idx] - &b_batch[idx];
+    }
+}
+
+#[multiversion(targets("x86_64+sse2", "x86_64+avx2"))]
+#[inline]
+fn batch_vecadd_dispatch(a_batch: &[FieldElement51], b_batch: &[FieldElement51], output: &mut [FieldElement51]) {
+    debug_assert_eq!(a_batch.len(), b_batch.len());
+    debug_assert_eq!(a_batch.len(), output.len());
+
+    #[cfg(target_feature = "avx2")]
+    {
+        batch_vecadd_simd_avx2(a_batch, b_batch, output);
+        return;
+    }
+
+    // Scalar fallback (also used for the "default" target)
+    for i in 0..a_batch.len() {
+        output[i] = &a_batch[i] + &b_batch[i];
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[inline(always)]
+fn batch_vecadd_simd_avx2(a_batch: &[FieldElement51], b_batch: &[FieldElement51], output: &mut [FieldElement51]) {
+    use crate::backend::vector::packed_simd::u64x4;
+
+    let n = a_batch.len();
+
+    let chunks = n / 4;
+    let remainder = n % 4;
+
+    // Process 4-element chunks with SIMD
+    for chunk_idx in 0..chunks {
+        let base = chunk_idx * 4;
+
+        // Build results directly
+        let mut r0 = FieldElement51::ZERO;
+        let mut r1 = FieldElement51::ZERO;
+        let mut r2 = FieldElement51::ZERO;
+        let mut r3 = FieldElement51::ZERO;
+
+        for limb_idx in 0..5 {
+            let a_limbs = u64x4::new(
+                a_batch[base].0[limb_idx],
+                a_batch[base + 1].0[limb_idx],
+                a_batch[base + 2].0[limb_idx],
+                a_batch[base + 3].0[limb_idx],
+            );
+            let b_limbs = u64x4::new(
+                b_batch[base].0[limb_idx],
+                b_batch[base + 1].0[limb_idx],
+                b_batch[base + 2].0[limb_idx],
+                b_batch[base + 3].0[limb_idx],
+            );
+
+            // Simple SIMD addition
+            let sum = a_limbs + b_limbs;
+            let sum_array = sum.to_array();
+
+            r0.0[limb_idx] = sum_array[0];
+            r1.0[limb_idx] = sum_array[1];
+            r2.0[limb_idx] = sum_array[2];
+            r3.0[limb_idx] = sum_array[3];
+        }
+
+        // No reduction, to match the existing avx2 backend
+        output[base] = r0;
+        output[base + 1] = r1;
+        output[base + 2] = r2;
+        output[base + 3] = r3;
+    }
+
+    // Process remainder with scalar
+    for i in 0..remainder {
+        let idx = chunks * 4 + i;
+        output[idx] = &a_batch[idx] + &b_batch[idx];
     }
 }
 
@@ -1417,5 +1657,1071 @@ fn batch_sub_simd_avx2(batch: &[FieldElement51], target: &FieldElement51, output
     for i in 0..remainder {
         let idx = chunks * 4 + i;
         output[idx] = &batch[idx] - target;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to generate random field elements for testing
+    fn random_field_elements<const N: usize>() -> [FieldElement51; N] {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let mut result = [FieldElement51::ZERO; N];
+        for i in 0..N {
+            // Generate random bytes and reduce to field element
+            let mut bytes = [0u8; 32];
+            rng.fill(&mut bytes);
+            result[i] = FieldElement51::from_bytes(&bytes);
+        }
+        result
+    }
+
+    /// Helper to verify batch inversion correctness
+    fn verify_batch_inversion<const N: usize>(batch: &[FieldElement51; N]) {
+        let mut test_batch = *batch;
+        FieldElement51::batch_invert_not_ct(&mut test_batch);
+        
+        for i in 0..N {
+            if batch[i] == FieldElement51::ZERO {
+                assert_eq!(test_batch[i], FieldElement51::ZERO, "Zero should map to zero");
+            } else {
+                let product = &batch[i] * &test_batch[i];
+                assert_eq!(product, FieldElement51::ONE, 
+                    "x[{}] * inv(x[{}]) should equal ONE", i, i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_batch_invert_single() {
+        let batch = random_field_elements::<1>();
+        verify_batch_inversion(&batch);
+    }
+
+    #[test]
+    fn test_batch_invert_2_lane() {
+        // Test exact 2-lane batch
+        let batch = random_field_elements::<2>();
+        verify_batch_inversion(&batch);
+        
+        // Test multiple of 2
+        let batch = random_field_elements::<8>();
+        verify_batch_inversion(&batch);
+    }
+
+    #[test]
+    fn test_batch_invert_4_lane() {
+        // Test exact 4-lane batch
+        let batch = random_field_elements::<4>();
+        verify_batch_inversion(&batch);
+        
+        // Test multiple of 4
+        let batch = random_field_elements::<16>();
+        verify_batch_inversion(&batch);
+    }
+
+    #[test]
+    fn test_batch_invert_8_lane() {
+        // Test exact 8-lane batch (for future AVX-512)
+        let batch = random_field_elements::<8>();
+        verify_batch_inversion(&batch);
+        
+        // Test multiple of 8
+        let batch = random_field_elements::<32>();
+        verify_batch_inversion(&batch);
+    }
+
+    #[test]
+    fn test_batch_invert_remainders() {
+        // Test various remainder cases
+        verify_batch_inversion(&random_field_elements::<3>());
+        verify_batch_inversion(&random_field_elements::<5>());
+        verify_batch_inversion(&random_field_elements::<6>());
+        verify_batch_inversion(&random_field_elements::<7>());
+        verify_batch_inversion(&random_field_elements::<9>());
+        verify_batch_inversion(&random_field_elements::<11>());
+    }
+
+    #[test]
+    fn test_batch_invert_large() {
+        // Test large batches
+        verify_batch_inversion(&random_field_elements::<64>());
+        verify_batch_inversion(&random_field_elements::<128>());
+    }
+
+    #[test]
+    fn test_batch_invert_with_zeros() {
+        let mut batch = random_field_elements::<8>();
+        batch[2] = FieldElement51::ZERO;
+        batch[5] = FieldElement51::ZERO;
+        
+        verify_batch_inversion(&batch);
+    }
+
+    #[test]
+    fn test_batch_invert_all_zeros() {
+        let batch = [FieldElement51::ZERO; 8];
+        let mut test_batch = batch;
+        FieldElement51::batch_invert_not_ct(&mut test_batch);
+        
+        for i in 0..8 {
+            assert_eq!(test_batch[i], FieldElement51::ZERO);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Force-specific SIMD width tests
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_force_2_lane_inversion() {
+        let batch = random_field_elements::<16>();
+        let mut test_batch = batch;
+        
+        // Directly call the 2-lane implementation
+        FieldElement51::batch_invert_with_lanes::<16, 2>(&mut test_batch);
+        
+        for i in 0..16 {
+            let product = &batch[i] * &test_batch[i];
+            assert_eq!(product, FieldElement51::ONE);
+        }
+    }
+
+    #[test]
+    fn test_force_4_lane_inversion() {
+        let batch = random_field_elements::<16>();
+        let mut test_batch = batch;
+        
+        // Directly call the 4-lane implementation
+        FieldElement51::batch_invert_with_lanes::<16, 4>(&mut test_batch);
+        
+        for i in 0..16 {
+            let product = &batch[i] * &test_batch[i];
+            assert_eq!(product, FieldElement51::ONE);
+        }
+    }
+
+    #[test]
+    fn test_force_8_lane_inversion() {
+        let batch = random_field_elements::<16>();
+        let mut test_batch = batch;
+        
+        // Directly call the 8-lane implementation
+        FieldElement51::batch_invert_with_lanes::<16, 8>(&mut test_batch);
+        
+        for i in 0..16 {
+            let product = &batch[i] * &test_batch[i];
+            assert_eq!(product, FieldElement51::ONE);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Test invert_lane_product in isolation
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_invert_lane_product_2() {
+        let acc_lanes = random_field_elements::<2>();
+        let inv_lanes = FieldElement51::invert_lane_product::<2>(&acc_lanes);
+        
+        for i in 0..2 {
+            let product = &acc_lanes[i] * &inv_lanes[i];
+            assert_eq!(product, FieldElement51::ONE);
+        }
+    }
+
+    #[test]
+    fn test_invert_lane_product_4() {
+        let acc_lanes = random_field_elements::<4>();
+        let inv_lanes = FieldElement51::invert_lane_product::<4>(&acc_lanes);
+        
+        for i in 0..4 {
+            let product = &acc_lanes[i] * &inv_lanes[i];
+            assert_eq!(product, FieldElement51::ONE);
+        }
+    }
+
+    #[test]
+    fn test_invert_lane_product_8() {
+        let acc_lanes = random_field_elements::<8>();
+        let inv_lanes = FieldElement51::invert_lane_product::<8>(&acc_lanes);
+        
+        for i in 0..8 {
+            let product = &acc_lanes[i] * &inv_lanes[i];
+            assert_eq!(product, FieldElement51::ONE);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Consistency tests: compare different SIMD widths
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_simd_width_consistency() {
+        let batch = random_field_elements::<16>();
+        
+        let mut batch_2lane = batch;
+        let mut batch_4lane = batch;
+        
+        FieldElement51::batch_invert_with_lanes::<16, 2>(&mut batch_2lane);
+        FieldElement51::batch_invert_with_lanes::<16, 4>(&mut batch_4lane);
+        
+        for i in 0..16 {
+            assert_eq!(batch_2lane[i], batch_4lane[i],
+                "2-lane and 4-lane should produce identical results at index {}", i);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Benchmark helpers (not actual benchmarks, just perf indicators)
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    #[ignore] // Run with --ignored for perf testing
+    fn perf_scalar_vs_2lane() {
+        use std::time::Instant;
+        
+        let batch = random_field_elements::<1000>();
+        
+        // Scalar (via 1-lane)
+        let mut batch_scalar = batch;
+        let start = Instant::now();
+        for elem in &mut batch_scalar {
+            *elem = elem.invert();
+        }
+        let scalar_time = start.elapsed();
+        
+        // 2-lane batched
+        let mut batch_2lane = batch;
+        let start = Instant::now();
+        FieldElement51::batch_invert_with_lanes::<1000, 2>(&mut batch_2lane);
+        let batch_time = start.elapsed();
+        
+        println!("Scalar: {:?}, 2-lane batch: {:?}, speedup: {:.2}x",
+            scalar_time, batch_time,
+            scalar_time.as_secs_f64() / batch_time.as_secs_f64());
+    }
+
+    #[test]
+    #[ignore] // Run with --ignored for perf testing
+    fn perf_scalar_vs_batched() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        
+        const BATCH_SIZE: usize = 1000;
+        const ITERATIONS: usize = 100;
+        
+        let batch = random_field_elements::<BATCH_SIZE>();
+        
+        // ─────────────────────────────────────────────────────────
+        // Scalar: individual inversions
+        // ─────────────────────────────────────────────────────────
+        let mut scalar_total = std::time::Duration::ZERO;
+        for _ in 0..ITERATIONS {
+            let mut batch_scalar = black_box(batch);
+            let start = Instant::now();
+            for elem in &mut batch_scalar {
+                *elem = black_box(*elem).invert();
+            }
+            black_box(&batch_scalar);
+            scalar_total += start.elapsed();
+        }
+        let scalar_avg = scalar_total / ITERATIONS as u32;
+        
+        // ─────────────────────────────────────────────────────────
+        // 2-lane batched
+        // ─────────────────────────────────────────────────────────
+        let mut lane2_total = std::time::Duration::ZERO;
+        for _ in 0..ITERATIONS {
+            let mut batch_2lane = black_box(batch);
+            let start = Instant::now();
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2>(
+                black_box(&mut batch_2lane)
+            );
+            black_box(&batch_2lane);
+            lane2_total += start.elapsed();
+        }
+        let lane2_avg = lane2_total / ITERATIONS as u32;
+        
+        // ─────────────────────────────────────────────────────────
+        // 4-lane batched
+        // ─────────────────────────────────────────────────────────
+        let mut lane4_total = std::time::Duration::ZERO;
+        for _ in 0..ITERATIONS {
+            let mut batch_4lane = black_box(batch);
+            let start = Instant::now();
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 4>(
+                black_box(&mut batch_4lane)
+            );
+            black_box(&batch_4lane);
+            lane4_total += start.elapsed();
+        }
+        let lane4_avg = lane4_total / ITERATIONS as u32;
+        
+        // ─────────────────────────────────────────────────────────
+        // 8-lane batched (for AVX-512 or future)
+        // ─────────────────────────────────────────────────────────
+        let mut lane8_total = std::time::Duration::ZERO;
+        for _ in 0..ITERATIONS {
+            let mut batch_8lane = black_box(batch);
+            let start = Instant::now();
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 8>(
+                black_box(&mut batch_8lane)
+            );
+            black_box(&batch_8lane);
+            lane8_total += start.elapsed();
+        }
+        let lane8_avg = lane8_total / ITERATIONS as u32;
+        
+        // ─────────────────────────────────────────────────────────
+        // Auto-dispatch (uses best available SIMD)
+        // ─────────────────────────────────────────────────────────
+        let mut auto_total = std::time::Duration::ZERO;
+        for _ in 0..ITERATIONS {
+            let mut batch_auto = black_box(batch);
+            let start = Instant::now();
+            FieldElement51::batch_invert_not_ct(black_box(&mut batch_auto));
+            black_box(&batch_auto);
+            auto_total += start.elapsed();
+        }
+        let auto_avg = auto_total / ITERATIONS as u32;
+        
+        println!("\n═══════════════════════════════════════════════════════════");
+        println!("Batch Inversion Performance ({} elements, {} iterations)", BATCH_SIZE, ITERATIONS);
+        println!("═══════════════════════════════════════════════════════════");
+        println!("Scalar (individual):  {:>12?}", scalar_avg);
+        println!("2-lane batched:       {:>12?}  ({:.2}x vs scalar)", lane2_avg, scalar_avg.as_secs_f64() / lane2_avg.as_secs_f64());
+        println!("4-lane batched:       {:>12?}  ({:.2}x vs scalar)", lane4_avg, scalar_avg.as_secs_f64() / lane4_avg.as_secs_f64());
+        println!("8-lane batched:       {:>12?}  ({:.2}x vs scalar)", lane8_avg, scalar_avg.as_secs_f64() / lane8_avg.as_secs_f64());
+        println!("Auto-dispatch:        {:>12?}  ({:.2}x vs scalar)", auto_avg, scalar_avg.as_secs_f64() / auto_avg.as_secs_f64());
+        println!("───────────────────────────────────────────────────────────");
+        
+        #[cfg(target_arch = "x86_64")]
+        {
+            println!("CPU Features: SSE2={}, AVX2={}, AVX512F={}",
+                is_x86_feature_detected!("sse2"),
+                is_x86_feature_detected!("avx2"),
+                is_x86_feature_detected!("avx512f"));
+        }
+        println!();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_scaling_by_batch_size() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        
+        const ITERATIONS: usize = 50;
+        
+        println!("\n═══════════════════════════════════════════════════════════");
+        println!("Scaling by Batch Size (auto-dispatch, {} iterations)", ITERATIONS);
+        println!("═══════════════════════════════════════════════════════════");
+        println!("{:>8} {:>12} {:>12} {:>12}", "Size", "Total", "Per-elem", "vs N=8");
+        println!("───────────────────────────────────────────────────────────");
+        
+        // Baseline: 8 elements
+        let baseline_per_elem = {
+            let batch = random_field_elements::<8>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let mut b = black_box(batch);
+                let start = Instant::now();
+                FieldElement51::batch_invert_not_ct(black_box(&mut b));
+                black_box(&b);
+                total += start.elapsed();
+            }
+            let avg = total / ITERATIONS as u32;
+            let per_elem = avg / 8;
+            println!("{:>8} {:>12?} {:>12?} {:>12}", 8, avg, per_elem, "baseline");
+            per_elem
+        };
+        
+        macro_rules! bench_size {
+            ($size:expr) => {{
+                let batch = random_field_elements::<$size>();
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..ITERATIONS {
+                    let mut b = black_box(batch);
+                    let start = Instant::now();
+                    FieldElement51::batch_invert_not_ct(black_box(&mut b));
+                    black_box(&b);
+                    total += start.elapsed();
+                }
+                let avg = total / ITERATIONS as u32;
+                let per_elem = avg / $size as u32;
+                let speedup = baseline_per_elem.as_secs_f64() / per_elem.as_secs_f64();
+                println!("{:>8} {:>12?} {:>12?} {:>11.2}x", $size, avg, per_elem, speedup);
+            }};
+        }
+        
+        bench_size!(16);
+        bench_size!(32);
+        bench_size!(64);
+        bench_size!(128);
+        bench_size!(256);
+        bench_size!(512);
+        bench_size!(1024);
+        
+        println!();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_lane_width_comparison() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        
+        const BATCH_SIZE: usize = 256;
+        const ITERATIONS: usize = 100;
+        
+        let batch = random_field_elements::<BATCH_SIZE>();
+        
+        println!("\n═══════════════════════════════════════════════════════════");
+        println!("Lane Width Comparison ({} elements, {} iterations)", BATCH_SIZE, ITERATIONS);
+        println!("═══════════════════════════════════════════════════════════");
+        
+        // 1-lane (effectively Montgomery batch, no SIMD striping benefit)
+        let lane1_avg = {
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let mut b = black_box(batch);
+                let start = Instant::now();
+                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 1>(black_box(&mut b));
+                black_box(&b);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        let lane2_avg = {
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let mut b = black_box(batch);
+                let start = Instant::now();
+                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2>(black_box(&mut b));
+                black_box(&b);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        let lane4_avg = {
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let mut b = black_box(batch);
+                let start = Instant::now();
+                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 4>(black_box(&mut b));
+                black_box(&b);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        let lane8_avg = {
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let mut b = black_box(batch);
+                let start = Instant::now();
+                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 8>(black_box(&mut b));
+                black_box(&b);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        println!("1-lane:  {:>12?}  (baseline)", lane1_avg);
+        println!("2-lane:  {:>12?}  ({:.2}x vs 1-lane)", lane2_avg, lane1_avg.as_secs_f64() / lane2_avg.as_secs_f64());
+        println!("4-lane:  {:>12?}  ({:.2}x vs 1-lane)", lane4_avg, lane1_avg.as_secs_f64() / lane4_avg.as_secs_f64());
+        println!("8-lane:  {:>12?}  ({:.2}x vs 1-lane)", lane8_avg, lane1_avg.as_secs_f64() / lane8_avg.as_secs_f64());
+        println!();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_invert_lane_product_overhead() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        
+        const ITERATIONS: usize = 10000;
+        
+        println!("\n═══════════════════════════════════════════════════════════");
+        println!("invert_lane_product Overhead ({} iterations)", ITERATIONS);
+        println!("═══════════════════════════════════════════════════════════");
+        
+        // Single inversion baseline
+        let single_avg = {
+            let elem = random_field_elements::<1>()[0];
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let e = black_box(elem);
+                let start = Instant::now();
+                let inv = black_box(e).invert();
+                black_box(inv);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // 2-lane invert_lane_product
+        let lane2_avg = {
+            let acc = random_field_elements::<2>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let a = black_box(acc);
+                let start = Instant::now();
+                let inv = FieldElement51::invert_lane_product::<2>(black_box(&a));
+                black_box(inv);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // 4-lane invert_lane_product
+        let lane4_avg = {
+            let acc = random_field_elements::<4>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let a = black_box(acc);
+                let start = Instant::now();
+                let inv = FieldElement51::invert_lane_product::<4>(black_box(&a));
+                black_box(inv);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // 8-lane invert_lane_product
+        let lane8_avg = {
+            let acc = random_field_elements::<8>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let a = black_box(acc);
+                let start = Instant::now();
+                let inv = FieldElement51::invert_lane_product::<8>(black_box(&a));
+                black_box(inv);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        println!("Single invert():     {:>12?}  (baseline)", single_avg);
+        println!("2-lane product:      {:>12?}  ({:.2}x single, amortizes 2 inverts)", 
+            lane2_avg, lane2_avg.as_secs_f64() / single_avg.as_secs_f64());
+        println!("4-lane product:      {:>12?}  ({:.2}x single, amortizes 4 inverts)", 
+            lane4_avg, lane4_avg.as_secs_f64() / single_avg.as_secs_f64());
+        println!("8-lane product:      {:>12?}  ({:.2}x single, amortizes 8 inverts)", 
+            lane8_avg, lane8_avg.as_secs_f64() / single_avg.as_secs_f64());
+        println!();
+        
+        // Theoretical vs actual
+        println!("Cost-per-inverse:");
+        println!("  Single:   {:>12?}", single_avg);
+        println!("  2-lane:   {:>12?} (should be ~{:?} ideal)", lane2_avg / 2, single_avg / 2);
+        println!("  4-lane:   {:>12?}  (should be ~{:?} ideal)", lane4_avg / 4, single_avg / 4);
+        println!("  8-lane:   {:>12?}  (should be ~{:?} ideal)", lane8_avg / 8, single_avg / 8);
+        println!();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_batch_mul_throughput() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        
+        const ITERATIONS: usize = 10000;
+        
+        println!("\n═══════════════════════════════════════════════════════════");
+        println!("batch_mul Throughput ({} iterations)", ITERATIONS);
+        println!("═══════════════════════════════════════════════════════════");
+        
+        // Scalar multiply baseline
+        let scalar_avg = {
+            let a = random_field_elements::<1>()[0];
+            let b = random_field_elements::<1>()[0];
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = &aa * &bb;
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // batch_mul::<2>
+        let batch2_avg = {
+            let a = random_field_elements::<2>();
+            let b = random_field_elements::<2>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_mul::<2>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // batch_mul::<4>
+        let batch4_avg = {
+            let a = random_field_elements::<4>();
+            let b = random_field_elements::<4>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_mul::<4>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // batch_mul::<8>
+        let batch8_avg = {
+            let a = random_field_elements::<8>();
+            let b = random_field_elements::<8>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_mul::<8>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        println!("Scalar mul:      {:>12?}  (baseline)", scalar_avg);
+        println!("batch_mul::<2>:  {:>12?}  ({:.2} muls/time of 1)", batch2_avg, 2.0 * scalar_avg.as_secs_f64() / batch2_avg.as_secs_f64());
+        println!("batch_mul::<4>:  {:>12?}  ({:.2} muls/time of 1)", batch4_avg, 4.0 * scalar_avg.as_secs_f64() / batch4_avg.as_secs_f64());
+        println!("batch_mul::<8>:  {:>12?}  ({:.2} muls/time of 1)", batch8_avg, 8.0 * scalar_avg.as_secs_f64() / batch8_avg.as_secs_f64());
+        println!();
+        
+        println!("Per-element cost:");
+        println!("  Scalar:       {:>12?}", scalar_avg);
+        println!("  batch<2>:     {:>12?}", batch2_avg / 2);
+        println!("  batch<4>:     {:>12?}", batch4_avg / 4);
+        println!("  batch<8>:     {:>12?}", batch8_avg / 8);
+        println!();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_batch_add_throughput() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        
+        const ITERATIONS: usize = 10000;
+        
+        println!("\n═══════════════════════════════════════════════════════════");
+        println!("batch_add Throughput ({} iterations)", ITERATIONS);
+        println!("═══════════════════════════════════════════════════════════");
+        
+        // Scalar addition baseline
+        let scalar_avg = {
+            let a = random_field_elements::<1>()[0];
+            let b = random_field_elements::<1>()[0];
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = &aa + &bb;
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // batch_add::<2>
+        let batch2_avg = {
+            let a = random_field_elements::<2>();
+            let b = random_field_elements::<2>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_vecadd::<2>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // batch_add::<4>
+        let batch4_avg = {
+            let a = random_field_elements::<4>();
+            let b = random_field_elements::<4>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_vecadd::<4>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // batch_add::<8>
+        let batch8_avg = {
+            let a = random_field_elements::<8>();
+            let b = random_field_elements::<8>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_vecadd::<8>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        println!("Scalar add:      {:>12?}  (baseline)", scalar_avg);
+        println!("batch_add::<2>:  {:>12?}  ({:.2} adds/time of 1)", batch2_avg, 2.0 * scalar_avg.as_secs_f64() / batch2_avg.as_secs_f64());
+        println!("batch_add::<4>:  {:>12?}  ({:.2} adds/time of 1)", batch4_avg, 4.0 * scalar_avg.as_secs_f64() / batch4_avg.as_secs_f64());
+        println!("batch_add::<8>:  {:>12?}  ({:.2} adds/time of 1)", batch8_avg, 8.0 * scalar_avg.as_secs_f64() / batch8_avg.as_secs_f64());
+        println!();
+        
+        println!("Per-element cost:");
+        println!("  Scalar:       {:>12?}", scalar_avg);
+        println!("  batch<2>:     {:>12?}  ({:.2}x speedup)", batch2_avg / 2, scalar_avg.as_secs_f64() / (batch2_avg.as_secs_f64() / 2.0));
+        println!("  batch<4>:     {:>12?}  ({:.2}x speedup)", batch4_avg / 4, scalar_avg.as_secs_f64() / (batch4_avg.as_secs_f64() / 4.0));
+        println!("  batch<8>:     {:>12?}  ({:.2}x speedup)", batch8_avg / 8, scalar_avg.as_secs_f64() / (batch8_avg.as_secs_f64() / 8.0));
+        println!();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_batch_sub_throughput() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        
+        const ITERATIONS: usize = 10000;
+        
+        println!("\n═══════════════════════════════════════════════════════════");
+        println!("batch_sub Throughput ({} iterations)", ITERATIONS);
+        println!("═══════════════════════════════════════════════════════════");
+        
+        // Scalar subtraction baseline
+        let scalar_avg = {
+            let a = random_field_elements::<1>()[0];
+            let b = random_field_elements::<1>()[0];
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = &aa - &bb;
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // batch_sub::<2>
+        let batch2_avg = {
+            let a = random_field_elements::<2>();
+            let b = random_field_elements::<2>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_vecsub::<2>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // batch_sub::<4>
+        let batch4_avg = {
+            let a = random_field_elements::<4>();
+            let b = random_field_elements::<4>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_vecsub::<4>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // batch_sub::<8>
+        let batch8_avg = {
+            let a = random_field_elements::<8>();
+            let b = random_field_elements::<8>();
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_vecsub::<8>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        println!("Scalar sub:      {:>12?}  (baseline)", scalar_avg);
+        println!("batch_sub::<2>:  {:>12?}  ({:.2} subs/time of 1)", batch2_avg, 2.0 * scalar_avg.as_secs_f64() / batch2_avg.as_secs_f64());
+        println!("batch_sub::<4>:  {:>12?}  ({:.2} subs/time of 1)", batch4_avg, 4.0 * scalar_avg.as_secs_f64() / batch4_avg.as_secs_f64());
+        println!("batch_sub::<8>:  {:>12?}  ({:.2} subs/time of 1)", batch8_avg, 8.0 * scalar_avg.as_secs_f64() / batch8_avg.as_secs_f64());
+        println!();
+        
+        println!("Per-element cost:");
+        println!("  Scalar:       {:>12?}", scalar_avg);
+        println!("  batch<2>:     {:>12?}  ({:.2}x speedup)", batch2_avg / 2, scalar_avg.as_secs_f64() / (batch2_avg.as_secs_f64() / 2.0));
+        println!("  batch<4>:     {:>12?}  ({:.2}x speedup)", batch4_avg / 4, scalar_avg.as_secs_f64() / (batch4_avg.as_secs_f64() / 4.0));
+        println!("  batch<8>:     {:>12?}  ({:.2}x speedup)", batch8_avg / 8, scalar_avg.as_secs_f64() / (batch8_avg.as_secs_f64() / 8.0));
+        println!();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_batch_arithmetic_comparison() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        
+        const ITERATIONS: usize = 10000;
+        const BATCH_SIZE: usize = 4;
+        
+        println!("\n═══════════════════════════════════════════════════════════");
+        println!("Batch Arithmetic Comparison (batch size = {}, {} iterations)", BATCH_SIZE, ITERATIONS);
+        println!("═══════════════════════════════════════════════════════════");
+        
+        let a = random_field_elements::<BATCH_SIZE>();
+        let b = random_field_elements::<BATCH_SIZE>();
+        
+        // Addition
+        let add_avg = {
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_vecadd::<BATCH_SIZE>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // Subtraction
+        let sub_avg = {
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_vecsub::<BATCH_SIZE>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // Multiplication
+        let mul_avg = {
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let r = FieldElement51::batch_mul::<BATCH_SIZE>(&aa, &bb);
+                black_box(r);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        println!("Operation        Total Time    Per-element   Relative");
+        println!("───────────────────────────────────────────────────────────");
+        println!("batch_vecadd::<{}>:  {:>12?}  {:>12?}  (baseline)", BATCH_SIZE, add_avg, add_avg / BATCH_SIZE as u32);
+        println!("batch_vecsub::<{}>:  {:>12?}  {:>12?}  ({:.2}x cost vs add)", BATCH_SIZE, sub_avg, sub_avg / BATCH_SIZE as u32, sub_avg.as_secs_f64() / add_avg.as_secs_f64());
+        println!("batch_mul::<{}>:  {:>12?}  {:>12?}  ({:.2}x cost vs add)", BATCH_SIZE, mul_avg, mul_avg / BATCH_SIZE as u32, mul_avg.as_secs_f64() / add_avg.as_secs_f64());
+        println!();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_batch_ops_scaling() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        
+        const ITERATIONS: usize = 5000;
+        
+        println!("\n═══════════════════════════════════════════════════════════");
+        println!("Batch Operations Scaling ({} iterations)", ITERATIONS);
+        println!("═══════════════════════════════════════════════════════════");
+        
+        macro_rules! bench_batch_size {
+            ($size:expr) => {{
+                let a = random_field_elements::<$size>();
+                let b = random_field_elements::<$size>();
+                
+                let add_time = {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..ITERATIONS {
+                        let (aa, bb) = (black_box(a), black_box(b));
+                        let start = Instant::now();
+                        let r = FieldElement51::batch_vecadd::<$size>(&aa, &bb);
+                        black_box(r);
+                        total += start.elapsed();
+                    }
+                    total / ITERATIONS as u32
+                };
+                
+                let sub_time = {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..ITERATIONS {
+                        let (aa, bb) = (black_box(a), black_box(b));
+                        let start = Instant::now();
+                        let r = FieldElement51::batch_vecsub::<$size>(&aa, &bb);
+                        black_box(r);
+                        total += start.elapsed();
+                    }
+                    total / ITERATIONS as u32
+                };
+                
+                let mul_time = {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..ITERATIONS {
+                        let (aa, bb) = (black_box(a), black_box(b));
+                        let start = Instant::now();
+                        let r = FieldElement51::batch_mul::<$size>(&aa, &bb);
+                        black_box(r);
+                        total += start.elapsed();
+                    }
+                    total / ITERATIONS as u32
+                };
+                
+                println!("N={:>3}:  add={:>10?}  sub={:>10?}  mul={:>10?}  (per-elem: {:>10?} {:>10?} {:>10?})",
+                    $size,
+                    add_time, sub_time, mul_time,
+                    add_time / $size as u32,
+                    sub_time / $size as u32,
+                    mul_time / $size as u32
+                );
+            }};
+        }
+        
+        bench_batch_size!(1);
+        bench_batch_size!(2);
+        bench_batch_size!(4);
+        bench_batch_size!(8);
+        bench_batch_size!(16);
+        bench_batch_size!(32);
+        bench_batch_size!(64);
+        
+        println!();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_mixed_arithmetic_workload() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        
+        const ITERATIONS: usize = 1000;
+        const BATCH_SIZE: usize = 16;
+        
+        println!("\n═══════════════════════════════════════════════════════════");
+        println!("Mixed Arithmetic Workload (batch size = {}, {} iterations)", BATCH_SIZE, ITERATIONS);
+        println!("═══════════════════════════════════════════════════════════");
+        println!("Simulates: c = (a + b) * (a - b)");
+        println!();
+        
+        let a = random_field_elements::<BATCH_SIZE>();
+        let b = random_field_elements::<BATCH_SIZE>();
+        
+        // Scalar approach
+        let scalar_avg = {
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let mut result = [FieldElement51::ZERO; BATCH_SIZE];
+                for i in 0..BATCH_SIZE {
+                    let sum = &aa[i] + &bb[i];
+                    let diff = &aa[i] - &bb[i];
+                    result[i] = &sum * &diff;
+                }
+                black_box(result);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        // Batched approach
+        let batched_avg = {
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..ITERATIONS {
+                let (aa, bb) = (black_box(a), black_box(b));
+                let start = Instant::now();
+                let sum = FieldElement51::batch_vecadd::<BATCH_SIZE>(&aa, &bb);
+                let diff = FieldElement51::batch_vecsub::<BATCH_SIZE>(&aa, &bb);
+                let result = FieldElement51::batch_mul::<BATCH_SIZE>(&sum, &diff);
+                black_box(result);
+                total += start.elapsed();
+            }
+            total / ITERATIONS as u32
+        };
+        
+        println!("Scalar loop:  {:>12?}  (baseline)", scalar_avg);
+        println!("Batched ops:  {:>12?}  ({:.2}x speedup)", batched_avg, scalar_avg.as_secs_f64() / batched_avg.as_secs_f64());
+        println!();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_all_arithmetic_benchmarks() {
+        perf_batch_add_throughput();
+        perf_batch_sub_throughput();
+        perf_batch_mul_throughput();
+        perf_batch_arithmetic_comparison();
+        perf_batch_ops_scaling();
+        perf_mixed_arithmetic_workload();
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_complete_benchmark_suite() {
+        // Run all benchmarks
+        println!("\n");
+        println!("╔═══════════════════════════════════════════════════════════╗");
+        println!("║          COMPLETE BENCHMARK SUITE                         ║");
+        println!("╚═══════════════════════════════════════════════════════════╝");
+        
+        #[cfg(target_arch = "x86_64")]
+        {
+            println!("\nCPU Features:");
+            println!("  SSE2:     {}", is_x86_feature_detected!("sse2"));
+            println!("  AVX2:     {}", is_x86_feature_detected!("avx2"));
+            println!("  AVX512F:  {}", is_x86_feature_detected!("avx512f"));
+        }
+        
+        // Batch arithmetic
+        perf_batch_add_throughput();
+        perf_batch_sub_throughput();
+        perf_batch_mul_throughput();
+        perf_batch_arithmetic_comparison();
+        perf_batch_ops_scaling();
+        perf_mixed_arithmetic_workload();
+        
+        // Batch inversion
+        perf_scalar_vs_batched();
+        perf_scaling_by_batch_size();
+        perf_lane_width_comparison();
+        perf_invert_lane_product_overhead();
+        
+        println!("\n");
+        println!("╔═══════════════════════════════════════════════════════════╗");
+        println!("║          BENCHMARK SUITE COMPLETE                         ║");
+        println!("╚═══════════════════════════════════════════════════════════╝");
+        println!();
     }
 }

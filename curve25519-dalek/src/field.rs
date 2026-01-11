@@ -820,7 +820,7 @@ mod test {
         let mut elements = [a, ap58, asq, ainv, FieldElement::ONE, FieldElement::ZERO];
         let expected: Vec<_> = elements.iter().map(|elem| elem - &b).collect();
         
-        FieldElement::batch_subtract(&mut elements, &b);
+        FieldElement::batch_sub(&mut elements, &b);
         
         // Compare each batch result with individual subtraction
         for (i, elem) in elements.iter().enumerate() {

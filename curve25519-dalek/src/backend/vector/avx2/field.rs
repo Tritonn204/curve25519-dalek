@@ -884,6 +884,7 @@ pub struct FieldElement51x4 {
     pub(crate) limbs: [u64x4; 5],
 }
 
+#[cfg(target_feature = "avx2")]
 impl FieldElement51x4 {
     /// Create a new FieldElement51x4 from 4 FieldElement51 values
     #[inline(always)]
