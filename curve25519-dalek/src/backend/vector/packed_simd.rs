@@ -14,7 +14,7 @@
 //! UNSAFETY: Everything in this module assumes that we're running on hardware
 //!           which supports at least AVX2. This invariant *must* be enforced
 //!           by the callers of this code.
-use core::ops::{Add, AddAssign, BitAnd, BitAndAssign, BitXor, BitXorAssign, Sub};
+use core::ops::{Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Mul, Shl, Shr, Sub};
 
 use curve25519_dalek_derive::unsafe_target_feature;
 
@@ -131,6 +131,16 @@ macro_rules! impl_shared {
             }
         }
 
+        #[unsafe_target_feature("avx2")]
+        impl BitOr for $ty {
+            type Output = Self;
+
+            #[inline]
+            fn bitor(self, rhs: $ty) -> Self {
+                unsafe { core::arch::x86_64::_mm256_or_si256(self.0, rhs.0).into() }
+            }
+        }
+
         #[allow(clippy::assign_op_pattern)]
         #[unsafe_target_feature("avx2")]
         impl BitAndAssign for $ty {
@@ -146,6 +156,15 @@ macro_rules! impl_shared {
             #[inline]
             fn bitxor_assign(&mut self, rhs: $ty) {
                 *self = *self ^ rhs;
+            }
+        }
+
+        #[allow(clippy::assign_op_pattern)]
+        #[unsafe_target_feature("avx2")]
+        impl BitOrAssign for $ty {
+            #[inline]
+            fn bitor_assign(&mut self, rhs: $ty) {
+                *self = *self | rhs;
             }
         }
 
@@ -233,8 +252,22 @@ impl_shared!(
     _mm256_srli_epi32,
     _mm256_extract_epi32
 );
+impl_shared!(
+    u32x4,
+    u32,
+    _mm256_add_epi32,
+    _mm256_sub_epi32,
+    _mm256_slli_epi32,
+    _mm256_srli_epi32,
+    _mm256_extract_epi32
+);
 
 impl_conv!(u64x4 => u32x8);
+impl_conv!(u32x4 => u32x8);
+
+// i64x4 is just a type alias for u64x4 since the intrinsics work with two's complement
+#[allow(non_camel_case_types)]
+pub type i64x4 = u64x4;
 
 #[allow(dead_code)]
 impl u64x4 {
@@ -275,6 +308,127 @@ impl u64x4 {
     #[inline]
     pub fn splat(x: u64) -> u64x4 {
         unsafe { u64x4(core::arch::x86_64::_mm256_set1_epi64x(x as i64)) }
+    }
+}
+
+#[unsafe_target_feature("avx2")]
+impl u64x4 {
+    /// Extracts the vector into an array
+    #[inline]
+    pub fn to_array(self) -> [u64; 4] {
+        unsafe { core::mem::transmute::<core::arch::x86_64::__m256i, [u64; 4]>(self.0) }
+    }
+
+    /// Constructs from an array
+    #[inline]
+    pub fn from_array(arr: [u64; 4]) -> u64x4 {
+        u64x4::new(arr[0], arr[1], arr[2], arr[3])
+    }
+
+    /// Multiply each lane by a scalar using wrapping multiplication
+    /// AVX2 has no efficient 64×64→64 multiply, so we extract, multiply, and pack
+    #[inline]
+    pub fn mul_scalar(self, scalar: u64) -> u64x4 {
+        let arr = self.to_array();
+        u64x4::new(
+            arr[0].wrapping_mul(scalar),
+            arr[1].wrapping_mul(scalar),
+            arr[2].wrapping_mul(scalar),
+            arr[3].wrapping_mul(scalar),
+        )
+    }
+
+    /// Compare: returns 0xFFFFFFFFFFFFFFFF in lanes where self < rhs, 0 otherwise
+    #[inline]
+    pub fn cmplt(self, rhs: u64x4) -> u64x4 {
+        unsafe {
+            // AVX2 doesn't have unsigned comparison, so we use the signed comparison trick:
+            // XOR with i64::MIN to flip the sign bit, making unsigned comparison work via signed
+            let flip = u64x4::splat(i64::MIN as u64);
+            let a = (self ^ flip).0;
+            let b = (rhs ^ flip).0;
+            u64x4(core::arch::x86_64::_mm256_cmpgt_epi64(b, a))
+        }
+    }
+
+    /// Alias for cmplt (legacy API compatibility)
+    #[inline]
+    pub fn cmp_lt(self, rhs: u64x4) -> u64x4 {
+        self.cmplt(rhs)
+    }
+
+    /// Blend two vectors based on a mask: mask ? true_val : false_val
+    /// Lanes where mask is all 1s take from true_val, otherwise from false_val
+    #[inline]
+    pub fn blend(self, true_val: u64x4, false_val: u64x4) -> u64x4 {
+        unsafe {
+            u64x4(core::arch::x86_64::_mm256_blendv_epi8(
+                false_val.0,
+                true_val.0,
+                self.0,
+            ))
+        }
+    }
+
+    /// Signed comparison: returns 0xFFFFFFFFFFFFFFFF in lanes where self > rhs (as i64), 0 otherwise
+    #[inline]
+    pub fn cmp_gt(self, rhs: u64x4) -> u64x4 {
+        unsafe {
+            u64x4(core::arch::x86_64::_mm256_cmpgt_epi64(self.0, rhs.0))
+        }
+    }
+
+    /// Constructs from an i64 array (same as from u64 array, two's complement)
+    #[inline]
+    pub fn from(arr: [i64; 4]) -> u64x4 {
+        u64x4::new(arr[0] as u64, arr[1] as u64, arr[2] as u64, arr[3] as u64)
+    }
+}
+
+// Implement Mul for u64x4 (lane-wise wrapping multiplication)
+#[unsafe_target_feature("avx2")]
+impl Mul for u64x4 {
+    type Output = u64x4;
+
+    #[inline]
+    fn mul(self, rhs: u64x4) -> u64x4 {
+        // AVX2 has no efficient 64×64→64 multiply, use scalar
+        let a = self.to_array();
+        let b = rhs.to_array();
+        u64x4::new(
+            a[0].wrapping_mul(b[0]),
+            a[1].wrapping_mul(b[1]),
+            a[2].wrapping_mul(b[2]),
+            a[3].wrapping_mul(b[3]),
+        )
+    }
+}
+
+// Implement Shl for u64x4 (runtime shift count using vector shifts)
+#[unsafe_target_feature("avx2")]
+impl Shl<u32> for u64x4 {
+    type Output = u64x4;
+
+    #[inline]
+    fn shl(self, count: u32) -> u64x4 {
+        unsafe {
+            let count_vec = u64x4::splat(count as u64);
+            u64x4(core::arch::x86_64::_mm256_sllv_epi64(self.0, count_vec.0))
+        }
+    }
+}
+
+// Implement Shr<u32> for u64x4 (logical right shift with runtime shift count)
+#[unsafe_target_feature("avx2")]
+impl Shr<u32> for u64x4 {
+    type Output = u64x4;
+
+    #[inline]
+    fn shr(self, count: u32) -> u64x4 {
+        unsafe {
+            let count_vec = u64x4::splat(count as u64);
+            u64x4(core::arch::x86_64::_mm256_srlv_epi64(self.0, count_vec.0))
+        }
     }
 }
 
@@ -336,6 +490,54 @@ impl u32x8 {
     }
 }
 
+#[allow(dead_code)]
+impl u32x4 {
+    /// Constructs a new instance (lower 4 lanes of a __m256i).
+    #[unsafe_target_feature("avx2")]
+    #[inline]
+    pub fn new(x0: u32, x1: u32, x2: u32, x3: u32) -> u32x4 {
+        unsafe {
+            // Use lower 128 bits, upper bits are zero
+            u32x4(core::arch::x86_64::_mm256_set_epi32(
+                0, 0, 0, 0,
+                x3 as i32, x2 as i32, x1 as i32, x0 as i32,
+            ))
+        }
+    }
+
+    /// Constructs a new instance with all of the elements initialized to the given value.
+    #[unsafe_target_feature("avx2")]
+    #[inline]
+    pub fn splat(x: u32) -> u32x4 {
+        unsafe { u32x4(core::arch::x86_64::_mm256_set1_epi32(x as i32)) }
+    }
+
+    /// Constructs from an array
+    #[unsafe_target_feature("avx2")]
+    #[inline]
+    pub fn from_array(arr: [u32; 4]) -> u32x4 {
+        u32x4::new(arr[0], arr[1], arr[2], arr[3])
+    }
+}
+
+#[unsafe_target_feature("avx2")]
+impl u32x4 {
+    /// Extracts the vector into an array
+    #[inline]
+    pub fn to_array(self) -> [u32; 4] {
+        unsafe {
+            let full: [u32; 8] = core::mem::transmute::<core::arch::x86_64::__m256i, [u32; 8]>(self.0);
+            [full[0], full[1], full[2], full[3]]
+        }
+    }
+
+    /// Alias for cmpeq
+    #[inline]
+    pub fn cmp_eq(self, rhs: u32x4) -> u32x4 {
+        self.cmpeq(rhs)
+    }
+}
+
 #[unsafe_target_feature("avx2")]
 impl u32x8 {
     /// Multiplies the low unsigned 32-bits from each packed 64-bit element
@@ -346,5 +548,38 @@ impl u32x8 {
     pub fn mul32(self, rhs: u32x8) -> u64x4 {
         // NOTE: This ignores the upper 32-bits from each packed 64-bits.
         unsafe { core::arch::x86_64::_mm256_mul_epu32(self.0, rhs.0).into() }
+    }
+
+    /// Compares for equality, returns 0xFFFFFFFF in lanes where equal, 0 otherwise
+    #[inline]
+    pub fn cmpeq(self, rhs: u32x8) -> u32x8 {
+        unsafe { u32x8(core::arch::x86_64::_mm256_cmpeq_epi32(self.0, rhs.0)) }
+    }
+
+    /// Alias for cmpeq
+    #[inline]
+    pub fn cmp_eq(self, rhs: u32x8) -> u32x8 {
+        self.cmpeq(rhs)
+    }
+
+    /// Extracts the vector into an array
+    #[inline]
+    pub fn to_array(self) -> [u32; 8] {
+        unsafe { core::mem::transmute::<core::arch::x86_64::__m256i, [u32; 8]>(self.0) }
+    }
+
+    /// Constructs from an array
+    #[inline]
+    pub fn from_array(arr: [u32; 8]) -> u32x8 {
+        u32x8::new(arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7])
+    }
+}
+
+#[unsafe_target_feature("avx2")]
+impl u32x4 {
+    /// Compares for equality, returns 0xFFFFFFFF in lanes where equal, 0 otherwise
+    #[inline]
+    pub fn cmpeq(self, rhs: u32x4) -> u32x4 {
+        unsafe { u32x4(core::arch::x86_64::_mm256_cmpeq_epi32(self.0, rhs.0)) }
     }
 }

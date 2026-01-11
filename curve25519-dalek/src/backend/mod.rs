@@ -42,9 +42,6 @@ pub mod serial;
 #[cfg(curve25519_dalek_backend = "simd")]
 pub mod vector;
 
-#[cfg(feature = "ecdlp")]
-pub mod simd;
-
 #[derive(Copy, Clone)]
 enum BackendKind {
     #[cfg(curve25519_dalek_backend = "simd")]

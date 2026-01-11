@@ -876,6 +876,414 @@ impl Mul<&FieldElement2625x4> for &FieldElement2625x4 {
 }
 
 #[cfg(target_feature = "avx2")]
+/// A vector of 4 FieldElement51 values stored in a SIMD-friendly transposed layout
+#[derive(Clone, Copy, Debug)]
+#[repr(C, align(32))]
+pub struct FieldElement51x4 {
+    /// Transposed storage: limbs[i] = u64x4 containing [fe0.limb[i], fe1.limb[i], fe2.limb[i], fe3.limb[i]]
+    pub(crate) limbs: [u64x4; 5],
+}
+
+impl FieldElement51x4 {
+    /// Create a new FieldElement51x4 from 4 FieldElement51 values
+    #[inline(always)]
+    pub fn new(elements: &[FieldElement51; 4]) -> Self {
+        Self {
+            limbs: [
+                u64x4::new(elements[0].0[0], elements[1].0[0], elements[2].0[0], elements[3].0[0]),
+                u64x4::new(elements[0].0[1], elements[1].0[1], elements[2].0[1], elements[3].0[1]),
+                u64x4::new(elements[0].0[2], elements[1].0[2], elements[2].0[2], elements[3].0[2]),
+                u64x4::new(elements[0].0[3], elements[1].0[3], elements[2].0[3], elements[3].0[3]),
+                u64x4::new(elements[0].0[4], elements[1].0[4], elements[2].0[4], elements[3].0[4]),
+            ],
+        }
+    }
+
+    /// Split back into 4 individual FieldElement51 values
+    #[inline(always)]
+    pub fn split(self) -> [FieldElement51; 4] {
+        let l0 = self.limbs[0].to_array();
+        let l1 = self.limbs[1].to_array();
+        let l2 = self.limbs[2].to_array();
+        let l3 = self.limbs[3].to_array();
+        let l4 = self.limbs[4].to_array();
+
+        [
+            FieldElement51([l0[0], l1[0], l2[0], l3[0], l4[0]]),
+            FieldElement51([l0[1], l1[1], l2[1], l3[1], l4[1]]),
+            FieldElement51([l0[2], l1[2], l2[2], l3[2], l4[2]]),
+            FieldElement51([l0[3], l1[3], l2[3], l3[3], l4[3]]),
+        ]
+    }
+
+    /// Multiply 4 pairs of field elements simultaneously
+    /// Uses the exact logic from field_simd.rs batch_mul_4way_64bit
+    #[inline(always)]
+    pub fn mul(a_batch: &[FieldElement51; 4], b_batch: &[FieldElement51; 4]) -> [FieldElement51; 4] {
+        const LOW_51: u64 = (1 << 51) - 1;
+
+        // Helper: 64×64→128 multiplication using scalar wrapping_mul per lane
+        #[inline(always)]
+        fn mul64_to_128(a: u64x4, b: u64x4) -> (u64x4, u64x4) {
+            let a_arr = a.to_array();
+            let b_arr = b.to_array();
+            let mut res_lo = [0u64; 4];
+            let mut res_hi = [0u64; 4];
+
+            for i in 0..4 {
+                let a_val = a_arr[i];
+                let b_val = b_arr[i];
+
+                let a_lo = a_val & 0xFFFFFFFF;
+                let a_hi = a_val >> 32;
+                let b_lo = b_val & 0xFFFFFFFF;
+                let b_hi = b_val >> 32;
+
+                let lo_lo = a_lo * b_lo;
+                let lo_hi = a_lo * b_hi;
+                let hi_lo = a_hi * b_lo;
+                let hi_hi = a_hi * b_hi;
+
+                let mid = lo_hi.wrapping_add(hi_lo);
+                let mid_lo = mid << 32;
+                let mid_hi = mid >> 32;
+
+                let temp_lo = lo_lo.wrapping_add(mid_lo);
+                let carry = if temp_lo < lo_lo { 1 } else { 0 };
+
+                res_lo[i] = temp_lo;
+                res_hi[i] = hi_hi.wrapping_add(mid_hi).wrapping_add(carry);
+            }
+
+            (u64x4::from_array(res_lo), u64x4::from_array(res_hi))
+        }
+
+        // Helper: 128-bit addition
+        #[inline(always)]
+        fn add_128(a_lo: u64x4, a_hi: u64x4, b_lo: u64x4, b_hi: u64x4) -> (u64x4, u64x4) {
+            let sum_lo = a_lo + b_lo;
+            let carry_mask = sum_lo.cmplt(a_lo);
+            let carry = carry_mask & u64x4::splat(1);
+            let sum_hi = a_hi + b_hi + carry;
+            (sum_lo, sum_hi)
+        }
+
+        // Transpose input
+        let mut a = [u64x4::splat(0); 5];
+        let mut b = [u64x4::splat(0); 5];
+
+        for i in 0..5 {
+            a[i] = u64x4::new(a_batch[0].0[i], a_batch[1].0[i], a_batch[2].0[i], a_batch[3].0[i]);
+            b[i] = u64x4::new(b_batch[0].0[i], b_batch[1].0[i], b_batch[2].0[i], b_batch[3].0[i]);
+        }
+
+        let b1_19 = b[1].mul_scalar(19);
+        let b2_19 = b[2].mul_scalar(19);
+        let b3_19 = b[3].mul_scalar(19);
+        let b4_19 = b[4].mul_scalar(19);
+
+        // Compute all 25 products
+        let a0_b0 = mul64_to_128(a[0], b[0]);
+        let a0_b1 = mul64_to_128(a[0], b[1]);
+        let a0_b2 = mul64_to_128(a[0], b[2]);
+        let a0_b3 = mul64_to_128(a[0], b[3]);
+        let a0_b4 = mul64_to_128(a[0], b[4]);
+
+        let a1_b0 = mul64_to_128(a[1], b[0]);
+        let a1_b1 = mul64_to_128(a[1], b[1]);
+        let a1_b2 = mul64_to_128(a[1], b[2]);
+        let a1_b3 = mul64_to_128(a[1], b[3]);
+        let a1_b4_19 = mul64_to_128(a[1], b4_19);
+
+        let a2_b0 = mul64_to_128(a[2], b[0]);
+        let a2_b1 = mul64_to_128(a[2], b[1]);
+        let a2_b2 = mul64_to_128(a[2], b[2]);
+        let a2_b3_19 = mul64_to_128(a[2], b3_19);
+        let a2_b4_19 = mul64_to_128(a[2], b4_19);
+
+        let a3_b0 = mul64_to_128(a[3], b[0]);
+        let a3_b1 = mul64_to_128(a[3], b[1]);
+        let a3_b2_19 = mul64_to_128(a[3], b2_19);
+        let a3_b3_19 = mul64_to_128(a[3], b3_19);
+        let a3_b4_19 = mul64_to_128(a[3], b4_19);
+
+        let a4_b0 = mul64_to_128(a[4], b[0]);
+        let a4_b1_19 = mul64_to_128(a[4], b1_19);
+        let a4_b2_19 = mul64_to_128(a[4], b2_19);
+        let a4_b3_19 = mul64_to_128(a[4], b3_19);
+        let a4_b4_19 = mul64_to_128(a[4], b4_19);
+
+        // Accumulate into c0..c4
+        let (c0_lo, c0_hi) = {
+            let (lo, hi) = a0_b0;
+            let (lo, hi) = add_128(lo, hi, a4_b1_19.0, a4_b1_19.1);
+            let (lo, hi) = add_128(lo, hi, a3_b2_19.0, a3_b2_19.1);
+            let (lo, hi) = add_128(lo, hi, a2_b3_19.0, a2_b3_19.1);
+            add_128(lo, hi, a1_b4_19.0, a1_b4_19.1)
+        };
+
+        let (c1_lo, c1_hi) = {
+            let (lo, hi) = a1_b0;
+            let (lo, hi) = add_128(lo, hi, a0_b1.0, a0_b1.1);
+            let (lo, hi) = add_128(lo, hi, a4_b2_19.0, a4_b2_19.1);
+            let (lo, hi) = add_128(lo, hi, a3_b3_19.0, a3_b3_19.1);
+            add_128(lo, hi, a2_b4_19.0, a2_b4_19.1)
+        };
+
+        let (c2_lo, c2_hi) = {
+            let (lo, hi) = a2_b0;
+            let (lo, hi) = add_128(lo, hi, a1_b1.0, a1_b1.1);
+            let (lo, hi) = add_128(lo, hi, a0_b2.0, a0_b2.1);
+            let (lo, hi) = add_128(lo, hi, a4_b3_19.0, a4_b3_19.1);
+            add_128(lo, hi, a3_b4_19.0, a3_b4_19.1)
+        };
+
+        let (c3_lo, c3_hi) = {
+            let (lo, hi) = a3_b0;
+            let (lo, hi) = add_128(lo, hi, a2_b1.0, a2_b1.1);
+            let (lo, hi) = add_128(lo, hi, a1_b2.0, a1_b2.1);
+            let (lo, hi) = add_128(lo, hi, a0_b3.0, a0_b3.1);
+            add_128(lo, hi, a4_b4_19.0, a4_b4_19.1)
+        };
+
+        let (c4_lo, c4_hi) = {
+            let (lo, hi) = a4_b0;
+            let (lo, hi) = add_128(lo, hi, a3_b1.0, a3_b1.1);
+            let (lo, hi) = add_128(lo, hi, a2_b2.0, a2_b2.1);
+            let (lo, hi) = add_128(lo, hi, a1_b3.0, a1_b3.1);
+            add_128(lo, hi, a0_b4.0, a0_b4.1)
+        };
+
+        // Carry propagation
+        let mask_51 = u64x4::splat(LOW_51);
+        let mut limb0 = c0_lo & mask_51;
+        let mut carry = (c0_hi.shl::<13>()) | (c0_lo.shr::<51>());
+
+        macro_rules! propagate_carry {
+            ($c_lo:expr, $c_hi:expr) => {{
+                let acc = $c_lo + carry;
+                let limb = acc & mask_51;
+                let mut new_carry = ($c_hi.shl::<13>()) | (acc.shr::<51>());
+
+                // Check for overflow (rare: ~0.23% of cases)
+                let overflow_mask = acc.cmplt($c_lo);
+                let overflow_arr = overflow_mask.to_array();
+                if overflow_arr != [0, 0, 0, 0] {
+                    new_carry = new_carry + (overflow_mask & u64x4::splat(1 << 13));
+                }
+
+                carry = new_carry;
+                limb
+            }};
+        }
+
+        let limb1 = propagate_carry!(c1_lo, c1_hi);
+        let limb2 = propagate_carry!(c2_lo, c2_hi);
+        let limb3 = propagate_carry!(c3_lo, c3_hi);
+        let limb4 = propagate_carry!(c4_lo, c4_hi);
+
+        // Final reduction
+        limb0 = limb0 + carry.mul_scalar(19);
+        let carry5 = limb0.shr::<51>();
+        limb0 = limb0 & mask_51;
+        let limb1 = limb1 + carry5;
+
+        // Transpose output
+        let l0 = limb0.to_array();
+        let l1 = limb1.to_array();
+        let l2 = limb2.to_array();
+        let l3 = limb3.to_array();
+        let l4 = limb4.to_array();
+
+        [
+            FieldElement51([l0[0], l1[0], l2[0], l3[0], l4[0]]),
+            FieldElement51([l0[1], l1[1], l2[1], l3[1], l4[1]]),
+            FieldElement51([l0[2], l1[2], l2[2], l3[2], l4[2]]),
+            FieldElement51([l0[3], l1[3], l2[3], l3[3], l4[3]]),
+        ]
+    }
+
+    /// Square 4 field elements simultaneously
+    /// Uses the exact logic from field_simd.rs batch_square_4way_64bit
+    #[inline(always)]
+    pub fn square(a_batch: &[FieldElement51; 4]) -> [FieldElement51; 4] {
+        const LOW_51: u64 = (1 << 51) - 1;
+
+        // Helper: 64×64→128 multiplication using scalar wrapping_mul per lane
+        #[inline(always)]
+        fn mul64_to_128(a: u64x4, b: u64x4) -> (u64x4, u64x4) {
+            let a_arr = a.to_array();
+            let b_arr = b.to_array();
+            let mut res_lo = [0u64; 4];
+            let mut res_hi = [0u64; 4];
+
+            for i in 0..4 {
+                let a_val = a_arr[i];
+                let b_val = b_arr[i];
+
+                let a_lo = a_val & 0xFFFFFFFF;
+                let a_hi = a_val >> 32;
+                let b_lo = b_val & 0xFFFFFFFF;
+                let b_hi = b_val >> 32;
+
+                let lo_lo = a_lo * b_lo;
+                let lo_hi = a_lo * b_hi;
+                let hi_lo = a_hi * b_lo;
+                let hi_hi = a_hi * b_hi;
+
+                let mid = lo_hi.wrapping_add(hi_lo);
+                let mid_lo = mid << 32;
+                let mid_hi = mid >> 32;
+
+                let temp_lo = lo_lo.wrapping_add(mid_lo);
+                let carry = if temp_lo < lo_lo { 1 } else { 0 };
+
+                res_lo[i] = temp_lo;
+                res_hi[i] = hi_hi.wrapping_add(mid_hi).wrapping_add(carry);
+            }
+
+            (u64x4::from_array(res_lo), u64x4::from_array(res_hi))
+        }
+
+        // Helper: 128-bit addition
+        #[inline(always)]
+        fn add_128(a_lo: u64x4, a_hi: u64x4, b_lo: u64x4, b_hi: u64x4) -> (u64x4, u64x4) {
+            let sum_lo = a_lo + b_lo;
+            let carry_mask = sum_lo.cmplt(a_lo);
+            let carry = carry_mask & u64x4::splat(1);
+            let sum_hi = a_hi + b_hi + carry;
+            (sum_lo, sum_hi)
+        }
+
+        // Helper: double a 128-bit value
+        #[inline(always)]
+        fn double_128(lo: u64x4, hi: u64x4) -> (u64x4, u64x4) {
+            let new_hi = (hi.shl::<1>()) | (lo.shr::<63>());
+            let new_lo = lo.shl::<1>();
+            (new_lo, new_hi)
+        }
+
+        // Transpose input
+        let mut a = [u64x4::splat(0); 5];
+
+        for i in 0..5 {
+            a[i] = u64x4::new(a_batch[0].0[i], a_batch[1].0[i], a_batch[2].0[i], a_batch[3].0[i]);
+        }
+
+        let a3_19 = a[3].mul_scalar(19);
+        let a4_19 = a[4].mul_scalar(19);
+
+        // Compute unique products (exploiting squaring symmetry)
+        let a0_sq = mul64_to_128(a[0], a[0]);
+        let a1_sq = mul64_to_128(a[1], a[1]);
+        let a2_sq = mul64_to_128(a[2], a[2]);
+
+        let a0_a1 = mul64_to_128(a[0], a[1]);
+        let a0_a2 = mul64_to_128(a[0], a[2]);
+        let a0_a3 = mul64_to_128(a[0], a[3]);
+        let a0_a4 = mul64_to_128(a[0], a[4]);
+        let a1_a2 = mul64_to_128(a[1], a[2]);
+        let a1_a3 = mul64_to_128(a[1], a[3]);
+        let a1_a4_19 = mul64_to_128(a[1], a4_19);
+        let a2_a3_19 = mul64_to_128(a[2], a3_19);
+        let a2_a4_19 = mul64_to_128(a[2], a4_19);
+        let a3_a3_19 = mul64_to_128(a[3], a3_19);
+        let a4_a3_19 = mul64_to_128(a[4], a3_19);
+        let a4_a4_19 = mul64_to_128(a[4], a4_19);
+
+        // Double the products that appear with coefficient 2
+        let a0_a1_2 = double_128(a0_a1.0, a0_a1.1);
+        let a0_a2_2 = double_128(a0_a2.0, a0_a2.1);
+        let a0_a3_2 = double_128(a0_a3.0, a0_a3.1);
+        let a0_a4_2 = double_128(a0_a4.0, a0_a4.1);
+        let a1_a2_2 = double_128(a1_a2.0, a1_a2.1);
+        let a1_a3_2 = double_128(a1_a3.0, a1_a3.1);
+        let a1_a4_19_2 = double_128(a1_a4_19.0, a1_a4_19.1);
+        let a2_a3_19_2 = double_128(a2_a3_19.0, a2_a3_19.1);
+        let a2_a4_19_2 = double_128(a2_a4_19.0, a2_a4_19.1);
+        let a4_a3_19_2 = double_128(a4_a3_19.0, a4_a3_19.1);
+
+        // Compute c0..c4
+        let (c0_lo, c0_hi) = {
+            let (lo, hi) = a0_sq;
+            let (lo, hi) = add_128(lo, hi, a1_a4_19_2.0, a1_a4_19_2.1);
+            add_128(lo, hi, a2_a3_19_2.0, a2_a3_19_2.1)
+        };
+
+        let (c1_lo, c1_hi) = {
+            let (lo, hi) = a3_a3_19;
+            let (lo, hi) = add_128(lo, hi, a0_a1_2.0, a0_a1_2.1);
+            add_128(lo, hi, a2_a4_19_2.0, a2_a4_19_2.1)
+        };
+
+        let (c2_lo, c2_hi) = {
+            let (lo, hi) = a1_sq;
+            let (lo, hi) = add_128(lo, hi, a0_a2_2.0, a0_a2_2.1);
+            add_128(lo, hi, a4_a3_19_2.0, a4_a3_19_2.1)
+        };
+
+        let (c3_lo, c3_hi) = {
+            let (lo, hi) = a4_a4_19;
+            let (lo, hi) = add_128(lo, hi, a0_a3_2.0, a0_a3_2.1);
+            add_128(lo, hi, a1_a2_2.0, a1_a2_2.1)
+        };
+
+        let (c4_lo, c4_hi) = {
+            let (lo, hi) = a2_sq;
+            let (lo, hi) = add_128(lo, hi, a0_a4_2.0, a0_a4_2.1);
+            add_128(lo, hi, a1_a3_2.0, a1_a3_2.1)
+        };
+
+        // Carry propagation
+        let mask_51 = u64x4::splat(LOW_51);
+        let mut limb0 = c0_lo & mask_51;
+        let mut carry = (c0_hi.shl::<13>()) | (c0_lo.shr::<51>());
+
+        macro_rules! propagate_carry {
+            ($c_lo:expr, $c_hi:expr) => {{
+                let acc = $c_lo + carry;
+                let limb = acc & mask_51;
+                let mut new_carry = ($c_hi.shl::<13>()) | (acc.shr::<51>());
+
+                // Check for overflow (rare: ~0.23% of cases)
+                let overflow_mask = acc.cmplt($c_lo);
+                let overflow_arr = overflow_mask.to_array();
+                if overflow_arr != [0, 0, 0, 0] {
+                    new_carry = new_carry + (overflow_mask & u64x4::splat(1 << 13));
+                }
+
+                carry = new_carry;
+                limb
+            }};
+        }
+
+        let limb1 = propagate_carry!(c1_lo, c1_hi);
+        let limb2 = propagate_carry!(c2_lo, c2_hi);
+        let limb3 = propagate_carry!(c3_lo, c3_hi);
+        let limb4 = propagate_carry!(c4_lo, c4_hi);
+
+        // Final reduction
+        limb0 = limb0 + carry.mul_scalar(19);
+        let carry5 = limb0.shr::<51>();
+        limb0 = limb0 & mask_51;
+        let limb1 = limb1 + carry5;
+
+        // Transpose output
+        let l0 = limb0.to_array();
+        let l1 = limb1.to_array();
+        let l2 = limb2.to_array();
+        let l3 = limb3.to_array();
+        let l4 = limb4.to_array();
+
+        [
+            FieldElement51([l0[0], l1[0], l2[0], l3[0], l4[0]]),
+            FieldElement51([l0[1], l1[1], l2[1], l3[1], l4[1]]),
+            FieldElement51([l0[2], l1[2], l2[2], l3[2], l4[2]]),
+            FieldElement51([l0[3], l1[3], l2[3], l3[3], l4[3]]),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

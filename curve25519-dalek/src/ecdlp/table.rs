@@ -151,7 +151,7 @@ impl CuckooT1HashMapView<'_> {
         let mut results = [(false, 0u64); 4];
         let cuckoo_len = self.cuckoo_len as u32;
 
-        use crate::ecdlp::simd_types::u32x4;
+        use crate::backend::vector::packed_simd::u32x4;
         let p2_mask = u32x4::splat(cuckoo_len - 1);
         
         // Process each cuckoo position
@@ -160,20 +160,20 @@ impl CuckooT1HashMapView<'_> {
             let key_offset = start + 4;
             
             // Extract keys for all 4 queries
-            let keys = u32x4::new([
+            let keys = u32x4::new(
                 u32::from_be_bytes(queries[0][key_offset..key_offset + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[1][key_offset..key_offset + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[2][key_offset..key_offset + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[3][key_offset..key_offset + 4].try_into().unwrap()),
-            ]);
-            
+            );
+
             // Extract hashes
-            let hashes = u32x4::new([
+            let hashes = u32x4::new(
                 u32::from_be_bytes(queries[0][start..start + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[1][start..start + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[2][start..start + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[3][start..start + 4].try_into().unwrap()),
-            ]);
+            );
             
             // Compute indices
             let indices = if cuckoo_len.is_power_of_two() {
@@ -182,24 +182,24 @@ impl CuckooT1HashMapView<'_> {
             } else {
                 // Fallback to scalar modulo - need to_array() first
                 let hash_array = hashes.to_array();
-                u32x4::new([
+                u32x4::new(
                     hash_array[0] % cuckoo_len,
                     hash_array[1] % cuckoo_len,
                     hash_array[2] % cuckoo_len,
                     hash_array[3] % cuckoo_len,
-                ])
+                )
             };
             
             // Extract indices as array
             let idx_array = indices.to_array();
             
             // Gather table keys (still need scalar gather)
-            let table_keys = u32x4::new([
+            let table_keys = u32x4::new(
                 self.keys[idx_array[0] as usize],
                 self.keys[idx_array[1] as usize],
                 self.keys[idx_array[2] as usize],
                 self.keys[idx_array[3] as usize],
-            ]);
+            );
             
             // Compare keys
             let matches = keys.cmp_eq(table_keys);
@@ -227,7 +227,7 @@ impl CuckooT1HashMapView<'_> {
         let mut results = [(false, 0u64); 8];
         let cuckoo_len = self.cuckoo_len as u32;
 
-        use crate::ecdlp::simd_types::u32x8;
+        use crate::backend::vector::packed_simd::u32x8;
         let p2_mask = u32x8::splat(cuckoo_len - 1);
         
         // Process each cuckoo position
@@ -236,7 +236,7 @@ impl CuckooT1HashMapView<'_> {
             let key_offset = start + 4;
             
             // Extract keys for all 8 queries
-            let keys = u32x8::new([
+            let keys = u32x8::new(
                 u32::from_be_bytes(queries[0][key_offset..key_offset + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[1][key_offset..key_offset + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[2][key_offset..key_offset + 4].try_into().unwrap()),
@@ -245,10 +245,10 @@ impl CuckooT1HashMapView<'_> {
                 u32::from_be_bytes(queries[5][key_offset..key_offset + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[6][key_offset..key_offset + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[7][key_offset..key_offset + 4].try_into().unwrap()),
-            ]);
-            
+            );
+
             // Extract hashes
-            let hashes = u32x8::new([
+            let hashes = u32x8::new(
                 u32::from_be_bytes(queries[0][start..start + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[1][start..start + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[2][start..start + 4].try_into().unwrap()),
@@ -257,7 +257,7 @@ impl CuckooT1HashMapView<'_> {
                 u32::from_be_bytes(queries[5][start..start + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[6][start..start + 4].try_into().unwrap()),
                 u32::from_be_bytes(queries[7][start..start + 4].try_into().unwrap()),
-            ]);
+            );
             
             // Compute indices
             let indices = if cuckoo_len.is_power_of_two() {
@@ -266,7 +266,7 @@ impl CuckooT1HashMapView<'_> {
             } else {
                 // Fallback to scalar modulo
                 let hash_array = hashes.to_array();
-                u32x8::new([
+                u32x8::new(
                     hash_array[0] % cuckoo_len,
                     hash_array[1] % cuckoo_len,
                     hash_array[2] % cuckoo_len,
@@ -275,14 +275,14 @@ impl CuckooT1HashMapView<'_> {
                     hash_array[5] % cuckoo_len,
                     hash_array[6] % cuckoo_len,
                     hash_array[7] % cuckoo_len,
-                ])
+                )
             };
             
             // Extract indices as array
             let idx_array = indices.to_array();
             
             // Gather table keys (still need scalar gather)
-            let table_keys = u32x8::new([
+            let table_keys = u32x8::new(
                 self.keys[idx_array[0] as usize],
                 self.keys[idx_array[1] as usize],
                 self.keys[idx_array[2] as usize],
@@ -291,7 +291,7 @@ impl CuckooT1HashMapView<'_> {
                 self.keys[idx_array[5] as usize],
                 self.keys[idx_array[6] as usize],
                 self.keys[idx_array[7] as usize],
-            ]);
+            );
             
             // Compare keys
             let matches = keys.cmp_eq(table_keys);

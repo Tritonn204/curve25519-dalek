@@ -87,10 +87,8 @@ mod ecdlp_notes {
     //! [fast-ecdlp-paper]: https://eprint.iacr.org/2022/1573
 }
 
-pub(crate) mod simd_types;
 mod affine_montgomery;
 mod table;
-mod field_simd;
 
 use crate::{
     RistrettoPoint, Scalar, constants::MONTGOMERY_A_NEG, constants::RISTRETTO_BASEPOINT_POINT as G,
@@ -1039,7 +1037,7 @@ fn batch_field_mul_and_square<const N: usize>(
 
 /// Batch converts multiple i64 values to Scalar types using SIMD where possible
 pub fn batch_i64_to_scalar(inputs: &[i64], outputs: &mut [Scalar]) {
-    use crate::ecdlp::simd_types::i64x4;
+    use crate::backend::vector::packed_simd::i64x4;
 
     assert_eq!(inputs.len(), outputs.len());
     let len = inputs.len();
@@ -1060,7 +1058,7 @@ pub fn batch_i64_to_scalar(inputs: &[i64], outputs: &mut [Scalar]) {
         let abs_i = (x ^ sign) - sign;
 
         // determine sign for choosing +/- later (mask lanes are typically all-ones or zero)
-        let is_nonneg = x.cmp_gt(i64x4::splat(-1)); // x >= 0
+        let is_nonneg = x.cmp_gt(i64x4::splat((-1i64) as u64)); // x >= 0
 
         let abs_arr = abs_i.to_array();
         let nonneg_arr = is_nonneg.to_array();
@@ -1092,7 +1090,7 @@ pub fn batch_compute_shifts<const N: usize>(
     l1: usize
 ) {
     {
-        use crate::ecdlp::simd_types::i64x4;
+        use crate::backend::vector::packed_simd::i64x4;
         
         let mut pos = 0;
         let j_start_i64 = j_start as i64;
@@ -1111,25 +1109,25 @@ pub fn batch_compute_shifts<const N: usize>(
             let j_indices = i64x4::from(indices);
             
             // Create j_start vector [j_start, j_start, j_start, j_start]
-            let j_start_vec = i64x4::splat(j_start_i64);
-            
+            let j_start_vec = i64x4::splat(j_start_i64 as u64);
+
             // Compute j_start - j and j_start + j
             let neg_j = j_start_vec - j_indices;
             let pos_j = j_start_vec + j_indices;
-            
+
             // Manually shift the values by multiplying
-            let neg_shifted = neg_j * i64x4::splat(shift_factor);
-            let pos_shifted = pos_j * i64x4::splat(shift_factor);
-            
+            let neg_shifted = neg_j * i64x4::splat(shift_factor as u64);
+            let pos_shifted = pos_j * i64x4::splat(shift_factor as u64);
+
             // Convert to arrays for access
             let neg_shifted_array = neg_shifted.to_array();
             let pos_shifted_array = pos_shifted.to_array();
-            
+
             // Store the results
             for i in 0..4 {
                 if pos + i < N {
-                    neg_shifts[pos + i] = neg_shifted_array[i];
-                    pos_shifts[pos + i] = pos_shifted_array[i];
+                    neg_shifts[pos + i] = neg_shifted_array[i] as i64;
+                    pos_shifts[pos + i] = pos_shifted_array[i] as i64;
                 }
             }
             
