@@ -639,42 +639,137 @@ impl FieldElement51 {
         output
     }
 
-    /// Batch invert 4 field elements
-    #[inline(always)]
-    pub(crate) fn batch_invert_4(elements: &mut [Self; 4]) {
-        if elements[0].is_zero().into()
-            || elements[1].is_zero().into()
-            || elements[2].is_zero().into()
-            || elements[3].is_zero().into()
+    /// Batch invert (NOT constant-time).
+    ///
+    /// - If any input is zero: inverts each nonzero individually, sets zeros to ZERO.
+    /// - Otherwise: uses a 4-lane batch inversion across the whole batch.
+    ///
+    /// Big wins come from `Self::batch_mul::<4>()`, which should be multiversioned
+    /// to use AVX2 when available.
+    #[inline]
+    pub(crate) fn batch_invert_not_ct<const BATCH_SIZE: usize>(batch: &mut [Self; BATCH_SIZE]) {
+        debug_assert!(BATCH_SIZE % 4 == 0);
+
+        // Non-x86_64 portable fallback: same algorithm, no multiversion.
+        #[cfg(not(target_arch = "x86_64"))]
         {
-            for e in elements.iter_mut() {
-                let nonzero = !e.is_zero();
-                if bool::from(nonzero) {
-                    *e = e.invert();
+            Self::batch_invert_not_ct_core::<BATCH_SIZE>(batch);
+            return;
+        }
+
+        // x86_64 multiversion dispatch
+        #[cfg(target_arch = "x86_64")]
+        {
+            batch_invert_not_ct_dispatch::<BATCH_SIZE>(batch);
+        }
+    }
+
+    #[inline(always)]
+    fn batch_invert_not_ct_core<const BATCH_SIZE: usize>(batch: &mut [Self; BATCH_SIZE]) {
+        debug_assert!(BATCH_SIZE % 4 == 0);
+
+        let any_zero = batch.iter().any(|x| bool::from(x.is_zero()));
+
+        if any_zero {
+            // Rare path: safe per-element inversion
+            for i in 0..BATCH_SIZE {
+                if !bool::from(batch[i].is_zero()) {
+                    batch[i] = batch[i].invert();
                 } else {
-                    *e = Self::ZERO;
+                    batch[i] = Self::ZERO;
                 }
             }
             return;
         }
 
-        let mut acc = Self::ONE;
-        let mut scratch = [Self::ONE; 4];
+        // Nonzero case: 4-lane batch inversion across the whole batch.
+        let num_chunks = BATCH_SIZE / 4;
 
-        for i in 0..4 {
-            scratch[i] = acc;
-            acc = &acc * &elements[i];
+        // scratch holds the lane-wise prefix products for every element.
+        // length = NUM_CHUNKS * 4 == BATCH_SIZE
+        let mut scratch = [Self::ONE; BATCH_SIZE];
+
+        // One accumulator per lane
+        let mut acc_lanes = [Self::ONE; 4];
+
+        // Forward pass
+        for chunk_idx in 0..num_chunks {
+            let base = chunk_idx * 4;
+
+            scratch[base]     = acc_lanes[0];
+            scratch[base + 1] = acc_lanes[1];
+            scratch[base + 2] = acc_lanes[2];
+            scratch[base + 3] = acc_lanes[3];
+
+            let input_chunk = [
+                batch[base],
+                batch[base + 1],
+                batch[base + 2],
+                batch[base + 3],
+            ];
+
+            // SIMD wins happen here (if batch_mul::<4> is multiversioned).
+            acc_lanes = Self::batch_mul::<4>(&acc_lanes, &input_chunk);
         }
 
-        acc = acc.invert();
+        // Invert product of lane accumulators (1 inversion total)
+        let p01 = &acc_lanes[0] * &acc_lanes[1];
+        let p23 = &acc_lanes[2] * &acc_lanes[3];
+        let inv_p0123 = (&p01 * &p23).invert();
 
-        for i in (0..4).rev() {
-            let tmp = &acc * &scratch[i];
-            acc = &acc * &elements[i];
-            elements[i] = tmp;
+        // Compute lane-specific factors so we can get inv(acc_lanes[k]) without extra inversions
+        let factors = [
+            &acc_lanes[1] * &p23, // = acc1 * acc2 * acc3
+            &acc_lanes[0] * &p23, // = acc0 * acc2 * acc3
+            &p01 * &acc_lanes[3], // = acc0 * acc1 * acc3
+            &p01 * &acc_lanes[2], // = acc0 * acc1 * acc2
+        ];
+
+        // acc_lanes[k] becomes inv(original acc_lanes[k])
+        acc_lanes = Self::batch_mul::<4>(&[inv_p0123; 4], &factors);
+
+        // Reverse pass
+        for chunk_idx in (0..num_chunks).rev() {
+            let base = chunk_idx * 4;
+
+            // Capture original inputs before overwrite
+            let input_chunk = [
+                batch[base],
+                batch[base + 1],
+                batch[base + 2],
+                batch[base + 3],
+            ];
+
+            let scratch_chunk = [
+                scratch[base],
+                scratch[base + 1],
+                scratch[base + 2],
+                scratch[base + 3],
+            ];
+
+            // inv(x_i) = inv(prefix_lane) * prefix_before_i
+            let results = Self::batch_mul::<4>(&acc_lanes, &scratch_chunk);
+
+            batch[base]     = results[0];
+            batch[base + 1] = results[1];
+            batch[base + 2] = results[2];
+            batch[base + 3] = results[3];
+
+            // Update lane accumulators by multiplying back the original inputs
+            acc_lanes = Self::batch_mul::<4>(&acc_lanes, &input_chunk);
         }
     }
 }
+
+
+#[cfg(target_arch = "x86_64")]
+#[multiversion(targets("x86_64+sse2", "x86_64+avx2"))]
+#[inline]
+fn batch_invert_not_ct_dispatch<const BATCH_SIZE: usize>(batch: &mut [FieldElement51; BATCH_SIZE]) {
+    FieldElement51::batch_invert_not_ct_core::<BATCH_SIZE>(batch);
+}
+
+
 
 #[multiversion(targets("x86_64+sse2", "x86_64+avx2"))]
 #[inline]

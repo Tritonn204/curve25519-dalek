@@ -128,7 +128,7 @@ impl AffineMontgomeryPoint {
 
         // 4) Invert denominators
         let mut inv_denominators = denominators;
-        FieldElement::batch_invert_4(&mut inv_denominators);
+        FieldElement::batch_invert_not_ct::<4>(&mut inv_denominators);
 
         // 5) lambdas = numerators * inv_denominators
         let lambdas = FieldElement::batch_mul::<4>(&numerators, &inv_denominators);
