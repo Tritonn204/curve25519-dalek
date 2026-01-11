@@ -65,33 +65,31 @@ impl AffineMontgomeryPoint {
         }
     }
 
-    /// Add the same point to 4 different points simultaneously
-    pub fn batch_addition_not_ct_4way(points: &[Self; 4], addend: &Self) -> [Self; 4] {
+    pub fn batch_addition_not_ct<const LANES: usize>(points: &[Self; LANES], addend: &Self) -> [Self; LANES] {
         if addend.is_identity_not_ct() {
             return *points;
         }
 
-        let mut results = [Self::identity(); 4];
-        let mut masks = [false; 4];
+        let mut results = [Self::identity(); LANES];
+        let mut masks = [false; LANES];
 
-        // 1) Gather origin coords (same as generic)
-        let mut u_origin = [FieldElement::ZERO; 4];
-        let mut v_origin = [FieldElement::ZERO; 4];
-        for i in 0..4 {
+        // 1) Gather origin coords
+        let mut u_origin = [FieldElement::ZERO; LANES];
+        let mut v_origin = [FieldElement::ZERO; LANES];
+        for i in 0..LANES {
             u_origin[i] = points[i].u;
             v_origin[i] = points[i].v;
         }
 
         // 2) Compute u_coords = u - addend.u, v_coords = v + addend.v
-        // (keep originals around like generic)
-        let u_diffs = FieldElement::batch_sub::<4>(&u_origin, &addend.u); // returns [FE;4]
-        let v_sums  = FieldElement::batch_add::<4>(&v_origin, &addend.v);      // returns [FE;4]
+        let u_diffs = FieldElement::batch_sub::<LANES>(&u_origin, &addend.u);
+        let v_sums  = FieldElement::batch_add::<LANES>(&v_origin, &addend.v);
 
-        // 3) Build denominators/numerators + masks (same branching structure as generic)
-        let mut denominators = [FieldElement::ZERO; 4];
-        let mut numerators   = [FieldElement::ZERO; 4];
+        // 3) Build denominators/numerators + masks
+        let mut denominators = [FieldElement::ONE; LANES];
+        let mut numerators   = [FieldElement::ZERO; LANES];
 
-        for i in 0..4 {
+        for i in 0..LANES {
             let p = &points[i];
 
             if p.is_identity_not_ct() {
@@ -128,20 +126,20 @@ impl AffineMontgomeryPoint {
 
         // 4) Invert denominators
         let mut inv_denominators = denominators;
-        FieldElement::batch_invert_not_ct::<4>(&mut inv_denominators);
+        FieldElement::batch_invert_not_ct::<LANES>(&mut inv_denominators);
 
         // 5) lambdas = numerators * inv_denominators
-        let lambdas = FieldElement::batch_mul::<4>(&numerators, &inv_denominators);
+        let lambdas = FieldElement::batch_mul::<LANES>(&numerators, &inv_denominators);
 
         // 6) u3 = lambda^2 - A - (u1 + u2)
-        let lambda_sq = FieldElement::batch_square::<4>(&lambdas);
+        let lambda_sq = FieldElement::batch_square::<LANES>(&lambdas);
 
         // u1 + u2 (u2 is addend.u broadcast)
-        let u_plus_addend = FieldElement::batch_add::<4>(&u_origin, &addend.u);
+        let u_plus_addend = FieldElement::batch_add::<LANES>(&u_origin, &addend.u);
 
-        // lambda_sq - A
+        // lambda_sq - A - (u1 + u2) (only for active lanes)
         let mut new_u = lambda_sq;
-        for i in 0..4 {
+        for i in 0..LANES {
             if !masks[i] {
                 new_u[i] = &new_u[i] - &MONTGOMERY_A;
                 new_u[i] = &new_u[i] - &u_plus_addend[i];
@@ -149,12 +147,12 @@ impl AffineMontgomeryPoint {
         }
 
         // 7) v3 = lambda*(u1 - u3) - v1
-        let u1_minus_u3 = FieldElement::batch_vecsub::<4>(&u_origin, &new_u);
-        let lambda_times = FieldElement::batch_mul::<4>(&lambdas, &u1_minus_u3);
-        let new_v = FieldElement::batch_vecsub::<4>(&lambda_times, &v_origin);
+        let u1_minus_u3 = FieldElement::batch_vecsub::<LANES>(&u_origin, &new_u);
+        let lambda_times = FieldElement::batch_mul::<LANES>(&lambdas, &u1_minus_u3);
+        let new_v = FieldElement::batch_vecsub::<LANES>(&lambda_times, &v_origin);
 
         // 8) Assemble
-        for i in 0..4 {
+        for i in 0..LANES {
             if !masks[i] {
                 results[i] = Self { u: new_u[i], v: new_v[i] };
             }

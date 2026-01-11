@@ -668,12 +668,12 @@ impl FieldElement51 {
     fn batch_invert_not_ct_core<const BATCH_SIZE: usize>(batch: &mut [Self; BATCH_SIZE]) {
         debug_assert!(BATCH_SIZE % 4 == 0);
 
-        let any_zero = batch.iter().any(|x| bool::from(x.is_zero()));
+        let mut zero_mask = [false; BATCH_SIZE];
+        let mut any_zero = false;
 
         if any_zero {
-            // Rare path: safe per-element inversion
             for i in 0..BATCH_SIZE {
-                if !bool::from(batch[i].is_zero()) {
+                if !zero_mask[i] {
                     batch[i] = batch[i].invert();
                 } else {
                     batch[i] = Self::ZERO;

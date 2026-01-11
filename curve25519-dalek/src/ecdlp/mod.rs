@@ -418,7 +418,7 @@ fn make_point_iterator_simd(
 
     #[inline(always)]
     fn add4_inplace(batch: &mut [AffineMontgomeryPoint; 4], addend: &AffineMontgomeryPoint) {
-        *batch = AffineMontgomeryPoint::batch_addition_not_ct_4way(batch, addend);
+        *batch = AffineMontgomeryPoint::batch_addition_not_ct::<4>(batch, addend);
     }
 
     struct OptimizedIterator {
