@@ -11,6 +11,7 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_arch = "x86_64")]
 #[curve25519_dalek_derive::unsafe_target_feature_specialize(
     "avx2",
     conditional(
@@ -18,6 +19,7 @@
         all(curve25519_dalek_backend = "unstable_avx512", nightly)
     )
 )]
+
 pub mod spec {
 
     use core::cmp::Ordering;
@@ -100,5 +102,45 @@ pub mod spec {
         }
 
         Q.into()
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub mod spec_neon {
+    use crate::backend::serial::curve_models::AffineNielsPoint as CachedPoint;
+    use crate::constants;
+    use crate::edwards::EdwardsPoint;
+    use crate::scalar::Scalar;
+    use crate::traits::Identity;
+    use crate::window::NafLookupTable5;
+
+    pub fn mul(a: &Scalar, A: &EdwardsPoint, b: &Scalar) -> EdwardsPoint {
+        let a_naf = a.non_adjacent_form(5);
+        let b_naf = b.non_adjacent_form(8);
+
+        let table_a = NafLookupTable5::<CachedPoint>::from(A);
+        let table_b = &constants::AFFINE_ODD_MULTIPLES_OF_BASEPOINT;
+
+        let mut R = EdwardsPoint::identity();
+
+        for i in (0..256).rev() {
+            R = R.double();
+
+            let b_i = b_naf[i];
+            if b_i > 0 {
+                R = (&R + &table_b.0[b_i as usize / 2]).as_extended();
+            } else if b_i < 0 {
+                R = (&R - &table_b.0[(-b_i) as usize / 2]).as_extended();
+            }
+
+            let a_i = a_naf[i];
+            if a_i > 0 {
+                R = (&R + &table_a.select(a_i as usize)).as_extended();
+            } else if a_i < 0 {
+                R = (&R - &table_a.select(-a_i as usize)).as_extended();
+            }
+        }
+
+        R
     }
 }

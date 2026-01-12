@@ -60,7 +60,7 @@ fn main() {
         Ok("fiat") => "fiat",
         Ok("serial") => "serial",
         Ok("simd") => {
-            // simd can only be enabled on x86_64 & 64bit target_pointer_width
+            // simd can only be enabled on x86_64 or aarch64, with 64bit target_pointer_width
             match is_capable_simd(&target_arch, curve25519_dalek_bits) {
                 true => "simd",
                 // If override is not possible this must result to compile error
@@ -99,7 +99,7 @@ fn main() {
 
 // Is the target arch & curve25519_dalek_bits potentially simd capable ?
 fn is_capable_simd(arch: &str, bits: DalekBits) -> bool {
-    arch == "x86_64" && bits == DalekBits::Dalek64
+    (arch == "x86_64" || arch == "aarch64") && bits == DalekBits::Dalek64
 }
 
 // Deterministic cfg(curve25519_dalek_bits) when this is not explicitly set.

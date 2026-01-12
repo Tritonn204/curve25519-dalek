@@ -11,6 +11,7 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_arch = "x86_64")]
 #[curve25519_dalek_derive::unsafe_target_feature_specialize(
     "avx2",
     conditional(
@@ -18,6 +19,7 @@
         all(curve25519_dalek_backend = "unstable_avx512", nightly)
     )
 )]
+
 pub mod spec {
 
     use alloc::vec::Vec;
@@ -124,6 +126,109 @@ pub mod spec {
             }
 
             Some(Q.into())
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub mod spec_neon {
+    use alloc::vec::Vec;
+
+    use core::borrow::Borrow;
+    use core::cmp::Ordering;
+
+    use crate::backend::serial::curve_models::AffineNielsPoint as CachedPoint;
+    use crate::edwards::EdwardsPoint;
+    use crate::scalar::Scalar;
+    use crate::traits::{Identity, MultiscalarMul, VartimeMultiscalarMul};
+    use crate::window::NafLookupTable5;
+
+    pub struct Straus;
+
+    impl MultiscalarMul for Straus {
+        type Point = EdwardsPoint;
+
+        fn multiscalar_mul<I, J>(scalars: I, points: J) -> EdwardsPoint
+        where
+            I: IntoIterator,
+            I::Item: Borrow<Scalar>,
+            J: IntoIterator,
+            J::Item: Borrow<EdwardsPoint>,
+        {
+            let nafs: Vec<_> = scalars
+                .into_iter()
+                .map(|c| c.borrow().non_adjacent_form(5))
+                .collect();
+            let lookup_tables: Vec<_> = points
+                .into_iter()
+                .map(|P| NafLookupTable5::<CachedPoint>::from(P.borrow()))
+                .collect();
+
+            let n = nafs.len();
+            assert_eq!(n, lookup_tables.len());
+
+            let mut R = EdwardsPoint::identity();
+            for j in (0..256).rev() {
+                R = R.double();
+
+                for i in 0..n {
+                    let t_ij = nafs[i][j];
+                    match t_ij.cmp(&0) {
+                        Ordering::Greater => {
+                            R = (&R + &lookup_tables[i].select(t_ij as usize)).as_extended();
+                        }
+                        Ordering::Less => {
+                            R = (&R - &lookup_tables[i].select(-t_ij as usize)).as_extended();
+                        }
+                        Ordering::Equal => {}
+                    }
+                }
+            }
+
+            R
+        }
+    }
+
+    impl VartimeMultiscalarMul for Straus {
+        type Point = EdwardsPoint;
+
+        fn optional_multiscalar_mul<I, J>(scalars: I, points: J) -> Option<EdwardsPoint>
+        where
+            I: IntoIterator,
+            I::Item: Borrow<Scalar>,
+            J: IntoIterator<Item = Option<EdwardsPoint>>,
+        {
+            let nafs: Vec<_> = scalars
+                .into_iter()
+                .map(|c| c.borrow().non_adjacent_form(5))
+                .collect();
+            let lookup_tables: Vec<_> = points
+                .into_iter()
+                .map(|P_opt| P_opt.map(|P| NafLookupTable5::<CachedPoint>::from(&P)))
+                .collect::<Option<Vec<_>>>()?;
+
+            let n = nafs.len();
+            assert_eq!(n, lookup_tables.len());
+
+            let mut R = EdwardsPoint::identity();
+            for j in (0..256).rev() {
+                R = R.double();
+
+                for i in 0..n {
+                    let t_ij = nafs[i][j];
+                    match t_ij.cmp(&0) {
+                        Ordering::Greater => {
+                            R = (&R + &lookup_tables[i].select(t_ij as usize)).as_extended();
+                        }
+                        Ordering::Less => {
+                            R = (&R - &lookup_tables[i].select(-t_ij as usize)).as_extended();
+                        }
+                        Ordering::Equal => {}
+                    }
+                }
+            }
+
+            Some(R)
         }
     }
 }

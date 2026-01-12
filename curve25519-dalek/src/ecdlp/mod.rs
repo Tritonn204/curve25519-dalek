@@ -570,7 +570,7 @@ pub fn par_decode<R: ProgressReportFunction + Sync>(
 
     let n_threads = args.n_threads.max(1);
 
-    let chunk_size: u64 = 64 * 320_000_000_000_0
+    let chunk_size: u64 = 64 * 320_000_000_000
         / ((30 - precomputed_tables.get_l1()).max(0) * 2).max(1) as u64;
 
     let total_range = args.range_end as u64 - args.range_start as u64;
@@ -968,7 +968,7 @@ fn fast_ecdlp(
 }
 
 #[inline(always)]
-fn batch_field_subtract<const N: usize>(
+fn batch_field_subtract_scalar<const N: usize>(
     batch: &mut [FieldElement; N],
     u_values: &[FieldElement; N],
     target_u: &FieldElement,
@@ -1196,7 +1196,7 @@ fn fast_ecdlp_simd(
             break 'outer;
         }
 
-        batch_field_subtract(batch, &t2_u_values, &target_montgomery.u);
+        batch_field_subtract_scalar(batch, &t2_u_values, &target_montgomery.u);
 
         // TODO: make a helper version of this function that has AVX512/8-way operations
         // Would use runtime dispatch by caching the path to be taken based on available SIMD width
@@ -1216,7 +1216,6 @@ fn fast_ecdlp_simd(
         
         // Invert Z -> nu, safely
         if any_zero {
-            // Optional but recommended for correctness parity with scalar Case 1:
             // If Z[j] == 0 then T2[j] == target, so m = ±j * 2^L1 (relative to j_start).
             for i in 0..BATCH_SIZE {
                 if fe_is_zero_raw(&batch[i]) {
@@ -1232,7 +1231,7 @@ fn fast_ecdlp_simd(
                 }
             }
 
-            // Safe per-element inversion (rare path)
+            // Safe per-element inversion
             for i in 0..BATCH_SIZE {
                 if !fe_is_zero_raw(&batch[i]) {
                     batch[i] = batch[i].invert();
@@ -1241,78 +1240,11 @@ fn fast_ecdlp_simd(
                 }
             }
         } else {
-            const NUM_CHUNKS: usize = BATCH_SIZE / 4;
-
-            let mut scratch = [FieldElement::ONE; NUM_CHUNKS * 4];
-            let mut acc_lanes = [FieldElement::ONE; 4];
-
-            // Forward pass
-            for chunk_idx in 0..NUM_CHUNKS {
-                let base = chunk_idx * 4;
-                let scratch_base = chunk_idx * 4;
-
-                scratch[scratch_base]     = acc_lanes[0];
-                scratch[scratch_base + 1] = acc_lanes[1];
-                scratch[scratch_base + 2] = acc_lanes[2];
-                scratch[scratch_base + 3] = acc_lanes[3];
-
-                let input_chunk = [
-                    batch[base],
-                    batch[base + 1],
-                    batch[base + 2],
-                    batch[base + 3],
-                ];
-
-                acc_lanes = FieldElement::batch_mul::<4>(&acc_lanes, &input_chunk);
-            }
-
-            // Combined inversion approach
-            let p01 = &acc_lanes[0] * &acc_lanes[1];
-            let p23 = &acc_lanes[2] * &acc_lanes[3];
-            let inv_p0123 = (&p01 * &p23).invert();
-
-            let factors = [
-                &acc_lanes[1] * &p23,
-                &acc_lanes[0] * &p23,
-                &p01 * &acc_lanes[3],
-                &p01 * &acc_lanes[2],
-            ];
-
-            acc_lanes = FieldElement::batch_mul::<4>(&[inv_p0123; 4], &factors);
-
-            // Reverse pass
-            for chunk_idx in (0..NUM_CHUNKS).rev() {
-                let base = chunk_idx * 4;
-                let scratch_base = chunk_idx * 4;
-
-                // Capture original inputs before overwrite
-                let input_chunk = [
-                    batch[base],
-                    batch[base + 1],
-                    batch[base + 2],
-                    batch[base + 3],
-                ];
-
-                let scratch_chunk = [
-                    scratch[scratch_base],
-                    scratch[scratch_base + 1],
-                    scratch[scratch_base + 2],
-                    scratch[scratch_base + 3],
-                ];
-
-                let results = FieldElement::batch_mul::<4>(&acc_lanes, &scratch_chunk);
-
-                batch[base]     = results[0];
-                batch[base + 1] = results[1];
-                batch[base + 2] = results[2];
-                batch[base + 3] = results[3];
-
-                // Update with ORIGINAL input chunk
-                acc_lanes = FieldElement::batch_mul::<4>(&acc_lanes, &input_chunk);
-            }
+            // SAFETY: We've verified no zeros exist in the batch above
+            FieldElement::batch_invert_not_ct_unchecked::<BATCH_SIZE>(batch);
         }
     
-        batch_field_subtract(
+        batch_field_subtract_scalar(
                   alphas,
                   &t2_cache_alpha,
                   &target_montgomery.u
@@ -1320,9 +1252,9 @@ fn fast_ecdlp_simd(
 
         // Batch compute qxs for the regular case
         // lambda = (T2[j]_y - Pm_y) * nu
-        batch_field_subtract(qx_tmp, &t2_vs, &target_montgomery.v);
+        batch_field_subtract_scalar(qx_tmp, &t2_vs, &target_montgomery.v);
         batch_field_mul_and_square::<BATCH_SIZE, 4>(qx_out, &qx_tmp, &batch);
-        batch_field_add(qx_tmp, &qx_out, alphas);
+        *qx_tmp = FieldElement::batch_vecadd::<BATCH_SIZE>(&qx_out, &alphas);
 
         // Process in groups of 8
         for chunk_idx in 0..(BATCH_SIZE / 8) {
@@ -1358,9 +1290,9 @@ fn fast_ecdlp_simd(
             break 'outer;
         }
 
-        batch_field_subtract(qx_tmp, &t2_vs_neg, &target_montgomery.v);
+        batch_field_subtract_scalar(qx_tmp, &t2_vs_neg, &target_montgomery.v);
         batch_field_mul_and_square::<BATCH_SIZE, 4>(qx_out, &qx_tmp, &batch);
-        batch_field_add(qx_tmp, &qx_out, alphas);
+        *qx_tmp = FieldElement::batch_vecadd::<BATCH_SIZE>(&qx_out, &alphas);
 
         // Process in groups of 8
         for chunk_idx in 0..(BATCH_SIZE / 8) {

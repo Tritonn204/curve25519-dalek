@@ -93,7 +93,7 @@ group-bits = ["group", "ff/bits"]
 ecdlp = ["alloc", "std", "dep:bytemuck"]
 digest = ["dep:digest"]
 
-[target.'cfg(all(not(curve25519_dalek_backend = "fiat"), not(curve25519_dalek_backend = "serial"), target_arch = "x86_64"))'.dependencies]
+[target.'cfg(all(not(curve25519_dalek_backend = "fiat"), not(curve25519_dalek_backend = "serial")))'.dependencies]
 curve25519-dalek-derive = { version = "0.1", path = "../curve25519-dalek-derive" }
 
 [lints.rust.unexpected_cfgs]

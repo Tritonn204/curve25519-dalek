@@ -15,7 +15,7 @@ use crate::{EdwardsPoint, RistrettoPoint, Scalar};
 
 use super::affine_montgomery::AffineMontgomeryPoint;
 
-pub(crate) const L2: usize = 9; // corresponds to a batch size of 256 and a T2 table of a few Ko.
+pub(crate) const L2: usize = 13; // corresponds to a batch size of 256 and a T2 table of a few Ko.
 pub(crate) const BATCH_SIZE: usize = 1 << (L2 - 1);
 
 pub(crate) const I_BITS: usize = L2 - 1;

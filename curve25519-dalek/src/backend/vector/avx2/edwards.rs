@@ -63,6 +63,7 @@ use super::field::{FieldElement2625x4, Lanes, Shuffle};
 #[derive(Copy, Clone, Debug)]
 pub struct ExtendedPoint(pub(super) FieldElement2625x4);
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl From<edwards::EdwardsPoint> for ExtendedPoint {
     fn from(P: edwards::EdwardsPoint) -> ExtendedPoint {
@@ -70,6 +71,7 @@ impl From<edwards::EdwardsPoint> for ExtendedPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl From<ExtendedPoint> for edwards::EdwardsPoint {
     fn from(P: ExtendedPoint) -> edwards::EdwardsPoint {
@@ -83,6 +85,7 @@ impl From<ExtendedPoint> for edwards::EdwardsPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl ConditionallySelectable for ExtendedPoint {
     fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
@@ -94,6 +97,7 @@ impl ConditionallySelectable for ExtendedPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl Default for ExtendedPoint {
     fn default() -> ExtendedPoint {
@@ -101,6 +105,7 @@ impl Default for ExtendedPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl Identity for ExtendedPoint {
     fn identity() -> ExtendedPoint {
@@ -108,6 +113,7 @@ impl Identity for ExtendedPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl ExtendedPoint {
     /// Compute the double of this point.
@@ -194,25 +200,28 @@ impl ExtendedPoint {
 #[derive(Copy, Clone, Debug)]
 pub struct CachedPoint(pub(super) FieldElement2625x4);
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl From<ExtendedPoint> for CachedPoint {
     fn from(P: ExtendedPoint) -> CachedPoint {
-        let mut x = P.0;
-
-        x = x.blend(x.diff_sum(), Lanes::AB);
-        // x = (Y2 - X2, Y2 + X2, Z2, T2) = (S2 S3 Z2 T2)
-
-        x = x * (121666, 121666, 2 * 121666, 2 * 121665);
-        // x = (121666*S2 121666*S3 2*121666*Z2 2*121665*T2)
-
-        x = x.blend(-x, Lanes::D);
-        // x = (121666*S2 121666*S3 2*121666*Z2 -2*121665*T2)
-
-        // The coefficients of the output are bounded with b < 0.007.
-        CachedPoint(x)
+        let xy_split = P.xy.split();
+        let zt_split = P.zt.split();
+        
+        let y_minus_x = &xy_split[1] - &xy_split[0];
+        let y_plus_x = &xy_split[1] + &xy_split[0];
+        
+        // 2*Z via addition (no double method)
+        let z2 = &zt_split[0] + &zt_split[0];
+        let t2d = &zt_split[1] * &constants::EDWARDS_D2;
+        
+        CachedPoint {
+            yx: FieldElement51x2::new(&y_minus_x, &y_plus_x),
+            z2t2: FieldElement51x2::new(&z2, &t2d),
+        }
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl Default for CachedPoint {
     fn default() -> CachedPoint {
@@ -220,6 +229,7 @@ impl Default for CachedPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl Identity for CachedPoint {
     fn identity() -> CachedPoint {
@@ -227,6 +237,7 @@ impl Identity for CachedPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl ConditionallySelectable for CachedPoint {
     fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
@@ -238,6 +249,7 @@ impl ConditionallySelectable for CachedPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl Neg for &CachedPoint {
     type Output = CachedPoint;
@@ -253,6 +265,7 @@ impl Neg for &CachedPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl Add<&CachedPoint> for &ExtendedPoint {
     type Output = ExtendedPoint;
@@ -291,6 +304,7 @@ impl Add<&CachedPoint> for &ExtendedPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl Sub<&CachedPoint> for &ExtendedPoint {
     type Output = ExtendedPoint;
@@ -305,6 +319,7 @@ impl Sub<&CachedPoint> for &ExtendedPoint {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl From<&edwards::EdwardsPoint> for LookupTable<CachedPoint> {
     fn from(point: &edwards::EdwardsPoint) -> Self {
@@ -317,6 +332,7 @@ impl From<&edwards::EdwardsPoint> for LookupTable<CachedPoint> {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[unsafe_target_feature("avx2")]
 impl From<&edwards::EdwardsPoint> for NafLookupTable5<CachedPoint> {
     fn from(point: &edwards::EdwardsPoint) -> Self {
@@ -331,6 +347,7 @@ impl From<&edwards::EdwardsPoint> for NafLookupTable5<CachedPoint> {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[cfg(any(feature = "precomputed-tables", feature = "alloc"))]
 #[unsafe_target_feature("avx2")]
 impl From<&edwards::EdwardsPoint> for NafLookupTable8<CachedPoint> {
@@ -346,6 +363,7 @@ impl From<&edwards::EdwardsPoint> for NafLookupTable8<CachedPoint> {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[cfg(target_feature = "avx2")]
 #[cfg(test)]
 mod test {

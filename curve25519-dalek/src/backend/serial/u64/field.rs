@@ -659,35 +659,42 @@ impl FieldElement51 {
     /// to use AVX2 when available.
     #[inline]
     pub(crate) fn batch_invert_not_ct<const BATCH_SIZE: usize>(batch: &mut [Self; BATCH_SIZE]) {
-        batch_invert_not_ct_dispatch::<BATCH_SIZE>(batch);
+        batch_invert_not_ct_dispatch::<BATCH_SIZE, true>(batch);
+    }
+
+    /// Same as above, but not checked for 0s
+    #[inline]
+    pub(crate) fn batch_invert_not_ct_unchecked<const BATCH_SIZE: usize>(batch: &mut [Self; BATCH_SIZE]) {
+        batch_invert_not_ct_dispatch::<BATCH_SIZE, false>(batch);
     }
 
     /// SIMD-striped batch inversion with configurable lane width
     #[inline]
-    fn batch_invert_with_lanes<const BATCH_SIZE: usize, const LANES: usize>(
+    fn batch_invert_with_lanes<const BATCH_SIZE: usize, const LANES: usize, const CHECKED: bool>(
         batch: &mut [Self; BATCH_SIZE]
     ) {
-        // Handle zero elements
-        let mut zero_mask = [false; BATCH_SIZE];
-        let mut any_zero = false;
-        for i in 0..BATCH_SIZE {
-            if batch[i] == Self::ZERO {
-                zero_mask[i] = true;
-                any_zero = true;
-            }
-        }
-        
-        if any_zero {
+        if CHECKED {
+            // Handle zero elements
+            let mut zero_mask = [false; BATCH_SIZE];
+            let mut any_zero = false;
             for i in 0..BATCH_SIZE {
-                batch[i] = if !zero_mask[i] {
-                    batch[i].invert()
-                } else {
-                    Self::ZERO
-                };
+                if batch[i].is_zero_not_ct() {
+                    zero_mask[i] = true;
+                    any_zero = true;
+                }
             }
-            return;
+            
+            if any_zero {
+                for i in 0..BATCH_SIZE {
+                    batch[i] = if !zero_mask[i] {
+                        batch[i].invert()
+                    } else {
+                        Self::ZERO
+                    };
+                }
+                return;
+            }
         }
-        
         // Split into full chunks and remainder
         let num_full_chunks = BATCH_SIZE / LANES;
         let remainder = BATCH_SIZE % LANES;
@@ -905,15 +912,15 @@ impl FieldElement51 {
 
 #[multiversion(targets("x86_64+sse2", "x86_64+avx2", "aarch64+neon"))]
 #[inline]
-fn batch_invert_not_ct_dispatch<const BATCH_SIZE: usize>(batch: &mut [FieldElement51; BATCH_SIZE]) {
+fn batch_invert_not_ct_dispatch<const BATCH_SIZE: usize, const CHECKED: bool>(batch: &mut [FieldElement51; BATCH_SIZE]) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") && BATCH_SIZE >= 4 {
-            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 4>(batch);
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 4, CHECKED>(batch);
             return;
         }
         if BATCH_SIZE >= 2 {
-            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2>(batch);
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2, CHECKED>(batch);
             return;
         }
     }
@@ -921,16 +928,16 @@ fn batch_invert_not_ct_dispatch<const BATCH_SIZE: usize>(batch: &mut [FieldEleme
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         if BATCH_SIZE >= 2 {
-            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2>(batch);
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2, CHECKED>(batch);
             return;
         }
     }
     
     // Scalar fallback or single element
-    if BATCH_SIZE == 1 {
+    if BATCH_SIZE == 1  && !batch[0].is_zero_not_ct() {
         batch[0] = batch[0].invert();
     } else {
-        FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2>(batch);
+        FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2, CHECKED>(batch);
     }
 }
 

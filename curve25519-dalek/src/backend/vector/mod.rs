@@ -14,9 +14,14 @@
 #[allow(missing_docs)]
 pub mod packed_simd;
 
+#[cfg(target_arch = "x86_64")]
 pub mod avx2;
 
+#[cfg(target_arch = "x86_64")]
 #[cfg(all(curve25519_dalek_backend = "unstable_avx512", nightly))]
 pub mod ifma;
+
+#[cfg(target_arch = "aarch64")]
+pub mod neon;
 
 pub mod scalar_mul;

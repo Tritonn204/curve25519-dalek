@@ -9,6 +9,7 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_arch = "x86_64")]
 #[curve25519_dalek_derive::unsafe_target_feature_specialize(
     "avx2",
     conditional(
@@ -16,6 +17,7 @@
         all(curve25519_dalek_backend = "unstable_avx512", nightly)
     )
 )]
+
 pub mod spec {
 
     use alloc::vec::Vec;
@@ -137,43 +139,145 @@ pub mod spec {
             )
         }
     }
+}
 
-    #[cfg(test)]
-    mod test {
-        #[test]
-        fn test_vartime_pippenger() {
-            use super::*;
-            use crate::constants;
-            use crate::scalar::Scalar;
+#[cfg(target_arch = "aarch64")]
+pub mod spec_neon {
+    use alloc::vec::Vec;
 
-            // Reuse points across different tests
-            let mut n = 512;
-            let x = Scalar::from(2128506u64).invert();
-            let y = Scalar::from(4443282u64).invert();
-            let points: Vec<_> = (0..n)
-                .map(|i| constants::ED25519_BASEPOINT_POINT * Scalar::from(1 + i as u64))
+    use core::borrow::Borrow;
+    use core::cmp::Ordering;
+
+    use crate::backend::serial::curve_models::AffineNielsPoint;
+    use crate::edwards::EdwardsPoint;
+    use crate::scalar::Scalar;
+    use crate::traits::{Identity, VartimeMultiscalarMul};
+
+    pub struct Pippenger;
+
+    impl VartimeMultiscalarMul for Pippenger {
+        type Point = EdwardsPoint;
+
+        fn optional_multiscalar_mul<I, J>(scalars: I, points: J) -> Option<EdwardsPoint>
+        where
+            I: IntoIterator,
+            I::Item: Borrow<Scalar>,
+            J: IntoIterator<Item = Option<EdwardsPoint>>,
+        {
+            let mut scalars = scalars.into_iter();
+            let size = scalars.by_ref().size_hint().0;
+            
+            let w = if size < 500 {
+                6
+            } else if size < 800 {
+                7
+            } else {
+                8
+            };
+
+            let max_digit: usize = 1 << w;
+            let digits_count: usize = Scalar::to_radix_2w_size_hint(w);
+            let buckets_count: usize = max_digit / 2;
+
+            let scalars = scalars.map(|s| s.borrow().as_radix_2w(w));
+
+            // Convert points to AffineNielsPoint for efficient addition
+            let points = points
+                .into_iter()
+                .map(|p| p.map(|P| P.as_affine_niels()));
+
+            let scalars_points = scalars
+                .zip(points)
+                .map(|(s, maybe_p)| maybe_p.map(|p| (s, p)))
+                .collect::<Option<Vec<_>>>()?;
+
+            // Use EdwardsPoint for bucket accumulation
+            let mut buckets: Vec<EdwardsPoint> = (0..buckets_count)
+                .map(|_| EdwardsPoint::identity())
                 .collect();
-            let scalars: Vec<_> = (0..n)
-                .map(|i| x + (Scalar::from(i as u64) * y)) // fast way to make ~random but deterministic scalars
-                .collect();
 
-            let premultiplied: Vec<EdwardsPoint> = scalars
-                .iter()
-                .zip(points.iter())
-                .map(|(sc, pt)| sc * pt)
-                .collect();
+            let mut columns = (0..digits_count).rev().map(|digit_index| {
+                for bucket in &mut buckets {
+                    *bucket = EdwardsPoint::identity();
+                }
 
-            while n > 0 {
-                let scalars = &scalars[0..n].to_vec();
-                let points = &points[0..n].to_vec();
-                let control: EdwardsPoint = premultiplied[0..n].iter().sum();
+                for (digits, pt) in scalars_points.iter() {
+                    let digit = digits[digit_index] as i16;
+                    match digit.cmp(&0) {
+                        Ordering::Greater => {
+                            let b = (digit - 1) as usize;
+                            buckets[b] = (&buckets[b] + pt).as_extended();
+                        }
+                        Ordering::Less => {
+                            let b = (-digit - 1) as usize;
+                            buckets[b] = (&buckets[b] - pt).as_extended();
+                        }
+                        Ordering::Equal => {}
+                    }
+                }
 
-                let subject = Pippenger::vartime_multiscalar_mul(scalars.clone(), points.clone());
+                let mut buckets_intermediate_sum = buckets[buckets_count - 1];
+                let mut buckets_sum = buckets[buckets_count - 1];
+                
+                for i in (0..(buckets_count - 1)).rev() {
+                    // Add EdwardsPoints directly, then convert to affine for the addition
+                    let bucket_affine = buckets[i].as_affine_niels();
+                    buckets_intermediate_sum = (&buckets_intermediate_sum + &bucket_affine).as_extended();
+                    let intermediate_affine = buckets_intermediate_sum.as_affine_niels();
+                    buckets_sum = (&buckets_sum + &intermediate_affine).as_extended();
+                }
 
-                assert_eq!(subject.compress(), control.compress());
+                buckets_sum
+            });
 
-                n = n / 2;
-            }
+            let hi_column = columns.next().expect("should have more than zero digits");
+
+            Some(
+                columns
+                    .fold(hi_column, |total, p| {
+                        let p_affine = p.as_affine_niels();
+                        (&total.mul_by_pow_2(w as u32) + &p_affine).as_extended()
+                    })
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn test_vartime_pippenger_neon() {
+        use super::*;
+        use crate::constants;
+        use crate::scalar::Scalar;
+
+        // Reuse points across different tests
+        let mut n = 512;
+        let x = Scalar::from(2128506u64).invert();
+        let y = Scalar::from(4443282u64).invert();
+        let points: Vec<_> = (0..n)
+            .map(|i| constants::ED25519_BASEPOINT_POINT * Scalar::from(1 + i as u64))
+            .collect();
+        let scalars: Vec<_> = (0..n)
+            .map(|i| x + (Scalar::from(i as u64) * y)) // fast way to make ~random but deterministic scalars
+            .collect();
+
+        let premultiplied: Vec<EdwardsPoint> = scalars
+            .iter()
+            .zip(points.iter())
+            .map(|(sc, pt)| sc * pt)
+            .collect();
+
+        while n > 0 {
+            let scalars = &scalars[0..n].to_vec();
+            let points = &points[0..n].to_vec();
+            let control: EdwardsPoint = premultiplied[0..n].iter().sum();
+
+            let subject = Pippenger::vartime_multiscalar_mul(scalars.clone(), points.clone());
+
+            assert_eq!(subject.compress(), control.compress());
+
+            n = n / 2;
         }
     }
 }

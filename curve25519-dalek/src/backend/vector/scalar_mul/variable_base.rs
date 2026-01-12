@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+#[cfg(target_arch = "x86_64")]
 #[curve25519_dalek_derive::unsafe_target_feature_specialize(
     "avx2",
     conditional(
@@ -7,6 +8,7 @@
         all(curve25519_dalek_backend = "unstable_avx512", nightly)
     )
 )]
+
 pub mod spec {
 
     #[for_target_feature("avx2")]
@@ -43,5 +45,28 @@ pub mod spec {
             Q = &Q + &lookup_table.select(scalar_digits[i]);
         }
         Q.into()
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub mod spec_neon {
+    use crate::backend::serial::curve_models::AffineNielsPoint as CachedPoint;
+    use crate::edwards::EdwardsPoint;
+    use crate::scalar::Scalar;
+    use crate::traits::Identity;
+    use crate::window::LookupTable;
+
+    pub fn mul(point: &EdwardsPoint, scalar: &Scalar) -> EdwardsPoint {
+        let lookup_table = LookupTable::<CachedPoint>::from(point);
+        let scalar_digits = scalar.as_radix_16();
+        
+        let mut R = EdwardsPoint::identity();
+        
+        for i in (0..64).rev() {
+            R = R.mul_by_pow_2(4);
+            R = (&R + &lookup_table.select(scalar_digits[i])).as_extended();
+        }
+        
+        R
     }
 }
