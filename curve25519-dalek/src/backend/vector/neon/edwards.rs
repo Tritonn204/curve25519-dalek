@@ -355,7 +355,7 @@ mod test {
         addition_test_helper(P, Q);
 
         let P = constants::ED25519_BASEPOINT_POINT;
-        let Q = &constants::ED25519_BASEPOINT_TABLE * &Scalar::from(8475983829u64);
+        let Q = constants::ED25519_BASEPOINT_TABLE * &Scalar::from(8475983829u64);
         addition_test_helper(P, Q);
     }
 
@@ -375,7 +375,7 @@ mod test {
         let P = constants::ED25519_BASEPOINT_POINT;
         doubling_test_helper(P);
 
-        let P = &constants::ED25519_BASEPOINT_TABLE * &Scalar::from(8475983829u64);
+        let P = constants::ED25519_BASEPOINT_TABLE * &Scalar::from(8475983829u64);
         doubling_test_helper(P);
     }
 }

@@ -67,6 +67,7 @@ pub(crate) static CACHEDPOINT_IDENTITY: CachedPoint = CachedPoint {
     },
 };
 
+// TODO: Constants below need to be re-validated and audited to work, so they are currently unused in pippenger.rs
 /// Odd multiples of the Ed25519 basepoint: [B, 3B, 5B, ..., 127B]
 #[cfg(feature = "precomputed-tables")]
 pub(crate) static BASEPOINT_ODD_LOOKUP_TABLE: NafLookupTable8<CachedPoint> = NafLookupTable8([
