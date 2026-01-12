@@ -1788,7 +1788,7 @@ mod tests {
         let mut test_batch = batch;
         
         // Directly call the 2-lane implementation
-        FieldElement51::batch_invert_with_lanes::<16, 2>(&mut test_batch);
+        FieldElement51::batch_invert_with_lanes::<16, 2, true>(&mut test_batch);
         
         for i in 0..16 {
             let product = &batch[i] * &test_batch[i];
@@ -1802,7 +1802,7 @@ mod tests {
         let mut test_batch = batch;
         
         // Directly call the 4-lane implementation
-        FieldElement51::batch_invert_with_lanes::<16, 4>(&mut test_batch);
+        FieldElement51::batch_invert_with_lanes::<16, 4, true>(&mut test_batch);
         
         for i in 0..16 {
             let product = &batch[i] * &test_batch[i];
@@ -1816,7 +1816,7 @@ mod tests {
         let mut test_batch = batch;
         
         // Directly call the 8-lane implementation
-        FieldElement51::batch_invert_with_lanes::<16, 8>(&mut test_batch);
+        FieldElement51::batch_invert_with_lanes::<16, 8, true>(&mut test_batch);
         
         for i in 0..16 {
             let product = &batch[i] * &test_batch[i];
@@ -1872,8 +1872,8 @@ mod tests {
         let mut batch_2lane = batch;
         let mut batch_4lane = batch;
         
-        FieldElement51::batch_invert_with_lanes::<16, 2>(&mut batch_2lane);
-        FieldElement51::batch_invert_with_lanes::<16, 4>(&mut batch_4lane);
+        FieldElement51::batch_invert_with_lanes::<16, 2, true>(&mut batch_2lane);
+        FieldElement51::batch_invert_with_lanes::<16, 4, true>(&mut batch_4lane);
         
         for i in 0..16 {
             assert_eq!(batch_2lane[i], batch_4lane[i],
@@ -1903,7 +1903,7 @@ mod tests {
         // 2-lane batched
         let mut batch_2lane = batch;
         let start = Instant::now();
-        FieldElement51::batch_invert_with_lanes::<1000, 2>(&mut batch_2lane);
+        FieldElement51::batch_invert_with_lanes::<1000, 2, true>(&mut batch_2lane);
         let batch_time = start.elapsed();
         
         println!("Scalar: {:?}, 2-lane batch: {:?}, speedup: {:.2}x",
@@ -1944,7 +1944,7 @@ mod tests {
         for _ in 0..ITERATIONS {
             let mut batch_2lane = black_box(batch);
             let start = Instant::now();
-            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2>(
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2, true>(
                 black_box(&mut batch_2lane)
             );
             black_box(&batch_2lane);
@@ -1959,7 +1959,7 @@ mod tests {
         for _ in 0..ITERATIONS {
             let mut batch_4lane = black_box(batch);
             let start = Instant::now();
-            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 4>(
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 4, true>(
                 black_box(&mut batch_4lane)
             );
             black_box(&batch_4lane);
@@ -1974,7 +1974,7 @@ mod tests {
         for _ in 0..ITERATIONS {
             let mut batch_8lane = black_box(batch);
             let start = Instant::now();
-            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 8>(
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 8, true>(
                 black_box(&mut batch_8lane)
             );
             black_box(&batch_8lane);
@@ -2096,7 +2096,7 @@ mod tests {
             for _ in 0..ITERATIONS {
                 let mut b = black_box(batch);
                 let start = Instant::now();
-                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 1>(black_box(&mut b));
+                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 1, true>(black_box(&mut b));
                 black_box(&b);
                 total += start.elapsed();
             }
@@ -2108,7 +2108,7 @@ mod tests {
             for _ in 0..ITERATIONS {
                 let mut b = black_box(batch);
                 let start = Instant::now();
-                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2>(black_box(&mut b));
+                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2, true>(black_box(&mut b));
                 black_box(&b);
                 total += start.elapsed();
             }
@@ -2120,7 +2120,7 @@ mod tests {
             for _ in 0..ITERATIONS {
                 let mut b = black_box(batch);
                 let start = Instant::now();
-                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 4>(black_box(&mut b));
+                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 4, true>(black_box(&mut b));
                 black_box(&b);
                 total += start.elapsed();
             }
@@ -2132,7 +2132,7 @@ mod tests {
             for _ in 0..ITERATIONS {
                 let mut b = black_box(batch);
                 let start = Instant::now();
-                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 8>(black_box(&mut b));
+                FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 8, true>(black_box(&mut b));
                 black_box(&b);
                 total += start.elapsed();
             }

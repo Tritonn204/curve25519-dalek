@@ -245,6 +245,10 @@ pub mod spec_neon {
 
 #[cfg(test)]
 mod test {
+    use crate::EdwardsPoint;
+    use crate::backend::serial::scalar_mul::pippenger::Pippenger;
+    use crate::traits::VartimeMultiscalarMul;
+
     #[test]
     fn test_vartime_pippenger_neon() {
         use super::*;
