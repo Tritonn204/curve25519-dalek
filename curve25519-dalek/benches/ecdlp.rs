@@ -27,7 +27,7 @@ pub fn ecdlp_bench(c: &mut Criterion) {
             continue;
         }
 
-        c.bench_function(&format!("par fast ecdlp T={t}"), |b| {
+        c.bench_function(&format!("par fast ecdlp aggressive T={t}"), |b| {
             let num: u64 = TEST_VAL;
             let point = Scalar::from(num) * G;
             b.iter(|| {
@@ -40,7 +40,7 @@ pub fn ecdlp_bench(c: &mut Criterion) {
             });
         });
 
-        c.bench_function(&format!("par fast ecdlp T={t} scalar"), |b| {
+        c.bench_function(&format!("par fast ecdlp standard T={t}"), |b| {
             let num: u64 = TEST_VAL;
             let point = Scalar::from(num) * G;
             b.iter(|| {
