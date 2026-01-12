@@ -928,7 +928,7 @@ fn batch_invert_not_ct_dispatch<const BATCH_SIZE: usize, const CHECKED: bool>(ba
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         if BATCH_SIZE >= 2 {
-            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 2, CHECKED>(batch);
+            FieldElement51::batch_invert_with_lanes::<BATCH_SIZE, 4, CHECKED>(batch);
             return;
         }
     }
