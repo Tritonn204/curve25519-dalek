@@ -204,20 +204,19 @@ pub struct CachedPoint(pub(super) FieldElement2625x4);
 #[unsafe_target_feature("avx2")]
 impl From<ExtendedPoint> for CachedPoint {
     fn from(P: ExtendedPoint) -> CachedPoint {
-        let xy_split = P.xy.split();
-        let zt_split = P.zt.split();
-        
-        let y_minus_x = &xy_split[1] - &xy_split[0];
-        let y_plus_x = &xy_split[1] + &xy_split[0];
-        
-        // 2*Z via addition (no double method)
-        let z2 = &zt_split[0] + &zt_split[0];
-        let t2d = &zt_split[1] * &constants::EDWARDS_D2;
-        
-        CachedPoint {
-            yx: FieldElement51x2::new(&y_minus_x, &y_plus_x),
-            z2t2: FieldElement51x2::new(&z2, &t2d),
-        }
+        let mut x = P.0;
+
+        x = x.blend(x.diff_sum(), Lanes::AB);
+        // x = (Y2 - X2, Y2 + X2, Z2, T2) = (S2 S3 Z2 T2)
+
+        x = x * (121666, 121666, 2 * 121666, 2 * 121665);
+        // x = (121666*S2 121666*S3 2*121666*Z2 2*121665*T2)
+
+        x = x.blend(-x, Lanes::D);
+        // x = (121666*S2 121666*S3 2*121666*Z2 -2*121665*T2)
+
+        // The coefficients of the output are bounded with b < 0.007.
+        CachedPoint(x)
     }
 }
 
