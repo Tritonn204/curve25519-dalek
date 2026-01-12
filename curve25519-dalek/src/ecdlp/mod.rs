@@ -1198,10 +1198,6 @@ fn fast_ecdlp_simd(
 
         batch_field_subtract_scalar(batch, &t2_u_values, &target_montgomery.u);
 
-        // TODO: make a helper version of this function that has AVX512/8-way operations
-        // Would use runtime dispatch by caching the path to be taken based on available SIMD width
-
-        // 4-lane batch invert inlined
         #[inline(always)]
         fn fe_is_zero_raw(x: &FieldElement) -> bool {
             // FieldElement([u64; 5])
